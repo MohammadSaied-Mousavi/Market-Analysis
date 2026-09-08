@@ -97,6 +97,11 @@ LOOKBACK_DEFAULT = 60
 
 ZSCORE_WINDOW = 252  # ثابت، طبق تصمیم مشترک از UI قابل‌تنظیم نیست
 
+# ستون بازار برای بند «بازدهی/نوسان روزانه‌ی هر رژیم» — طبق تصمیم مشترک: SP500.
+# اگر دیتابیس این ستون را نداشته باشد، load_benchmark یک Series خالی
+# برمی‌گرداند و بخش‌های مربوطه بی‌صدا از خروجی حذف می‌شوند (نه خطا).
+BENCHMARK_COL = "SP500"
+
 # --- تنظیمات HMM (طبق تصمیم مشترک) ---
 N_HMM_STATES = 2
 TRAIN_FRAC = 0.8            # ۸۰٪ اول تاریخچه = train، بقیه = test
@@ -163,6 +168,83 @@ def _load_levels(df: pd.DataFrame, credit_col: str, inflation_col: str) -> pd.Da
     out = out.asfreq("B").ffill()
     out["CREDIT_BPS"] = out["CREDIT_RAW"] * 100
     out["INFLATION_BPS"] = out["INFLATION_RAW"] * 100
+    return out
+
+
+# ==========================================================================
+# پورت‌شده عیناً از regime_model1.py — برای «بازدهی/نوسان روزانه‌ی هر رژیم»
+# و «بازدهی هر زیربخش در هر رژیم». منطق HMM/محاسباتی این فایل دست‌نخورده.
+# ==========================================================================
+
+SECTOR_COLUMNS = {
+    "RSP": "هم‌وزن",
+    "XLK": "فناوری",
+    "XLF": "مالی",
+    "XLV": "بهداشت‌ودرمان",
+    "XLE": "انرژی",
+    "XLY": "مصرفی اختیاری",
+    "XLP": "مصرفی اساسی",
+    "XLB": "مواد اولیه",
+    "XLU": "خدمات عمومی",
+    "XLRE": "املاک",
+    "XLC": "ارتباطات",
+    "GDX": "طلا (معادن)",
+}
+
+
+@st.cache_data(show_spinner=False)
+def load_sector_prices(path: str, mtime: float) -> pd.DataFrame:
+    """فقط ستون‌هایی از SECTOR_COLUMNS که واقعاً توی دیتابیس هستن رو
+    می‌خونه (اگه updater.py هنوز اجرا نشده باشه، خالی برمی‌گرده، نه خطا)."""
+    available = pd.read_csv(path, nrows=0).columns
+    cols = [c for c in SECTOR_COLUMNS if c in available]
+    if not cols:
+        return pd.DataFrame()
+    df = pd.read_csv(path, usecols=["Date"] + cols)
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df.set_index("Date").sort_index()
+    for c in cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df.asfreq("B").ffill()
+
+
+@st.cache_data(show_spinner=False)
+def load_benchmark(path: str, mtime: float, col: str = BENCHMARK_COL) -> pd.Series:
+    """قیمت روزانه‌ی ستون بازار (پیش‌فرض SP500) را می‌خواند — پایه‌ی
+    محاسبه‌ی «بازدهی/نوسان روزانه‌ی هر رژیم». اگر ستون در دیتابیس نبود،
+    Series خالی برمی‌گرداند (نه خطا) و بخش‌های مربوطه در UI حذف می‌شوند."""
+    available = pd.read_csv(path, nrows=0).columns
+    if col not in available:
+        return pd.Series(dtype=float, name=col)
+    df = pd.read_csv(path, usecols=["Date", col])
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df.set_index("Date").sort_index()
+    s = pd.to_numeric(df[col], errors="coerce")
+    return s.asfreq("B").ffill()
+
+
+def sector_regime_returns(valid: pd.DataFrame, sector_df: pd.DataFrame) -> pd.DataFrame:
+    """میانگین بازدهی روزانه‌ی هر زیربخش (٪)، به تفکیک رژیم، محدود به
+    بازه‌ی valid.index. یک سطر برای هر ۴ رژیم برمی‌گرداند، حتی اگه رژیمی
+    توی این بازه رخ نداده باشه (NaN)."""
+    if sector_df.empty:
+        return pd.DataFrame()
+    sub = valid.dropna(subset=["Regime"])
+    if sub.empty:
+        return pd.DataFrame()
+
+    sector_ret = sector_df.pct_change().mul(100)
+    aligned = sector_ret.reindex(sub.index)
+    aligned["Regime"] = sub["Regime"]
+
+    out = aligned.groupby("Regime").mean(numeric_only=True)
+    cols = [c for c in SECTOR_COLUMNS if c in out.columns]
+    if not cols:
+        return pd.DataFrame()
+    out = out[cols].round(3)
+    out = out.reindex(list(REGIME_INFO.keys()))
+    out.columns = [f"{c} ({SECTOR_COLUMNS[c]})" for c in out.columns]
+    out.index.name = "Regime"
     return out
 
 
@@ -302,11 +384,17 @@ def _attach_hmm_regime(out: pd.DataFrame) -> pd.DataFrame:
 
     credit_state = credit_proba.values.argmax(axis=1)
     inflation_state = inflation_proba.values.argmax(axis=1)
+    # اطمینانِ argmax — احتمالِ فیلترشده‌ی همون حالتی که برچسبِ روز از آن انتخاب
+    # شده (نه فقط اینکه کدوم حالت برنده شده، بلکه چقدر با اطمینان برنده شده).
+    credit_confidence = credit_proba.values.max(axis=1)
+    inflation_confidence = inflation_proba.values.max(axis=1)
     regimes = [classify_hmm(c, i) for c, i in zip(credit_state, inflation_state)]
 
     out.loc[common_valid.index, "Regime"] = regimes
     out.loc[common_valid.index, "Credit_State"] = credit_state
     out.loc[common_valid.index, "Inflation_State"] = inflation_state
+    out.loc[common_valid.index, "Credit_Confidence"] = credit_confidence
+    out.loc[common_valid.index, "Inflation_Confidence"] = inflation_confidence
     out["Train_End_Date"] = train_end_date
     return out
 
@@ -325,27 +413,39 @@ def _days_in_state(state_series: pd.Series) -> pd.Series:
     return pd.Series(counts, index=state_series.index)
 
 
-def regime_statistics(df: pd.DataFrame) -> pd.DataFrame:
+def regime_statistics(df: pd.DataFrame, benchmark_ret: pd.Series | None = None) -> pd.DataFrame:
     """طبق تصمیم مشترک: این جدول از کل داده‌ی موجود (train+test) استفاده
     می‌کند، بدون توجه به مرز train/test — آن مرز فقط برای نمایش روی چارت
-    معناداره."""
-    sub = df.dropna(subset=["Regime"])
+    معناداره. اگر benchmark_ret داده بشه (سری بازدهی روزانه‌ی SP500، از
+    پیش align نشده)، دو ستون اضافه می‌شن: میانگین بازدهی روزانه و نوسان
+    روزانه (انحراف‌معیار خام، غیر سالانه‌شده) — پورت‌شده از regime_model1.py."""
+    sub = df.dropna(subset=["Regime"]).copy()
+    has_benchmark = benchmark_ret is not None and not benchmark_ret.empty
+    if has_benchmark:
+        sub["BENCHMARK_RET"] = benchmark_ret.reindex(sub.index)
+
     total_days = len(sub)
     rows = []
     for regime in REGIME_INFO:
         mask = sub["Regime"] == regime
         days = int(mask.sum())
         occurrences = int((mask & ~mask.shift(1, fill_value=False)).sum())
-        rows.append(
-            {
-                "Regime": regime,
-                "Days": days,
-                "% of Period": round(100 * days / total_days, 1) if total_days else np.nan,
-                "Avg Spread (bps)": round(sub.loc[mask, "CREDIT_BPS"].mean(), 0) if days else np.nan,
-                "Avg Inflation (bps)": round(sub.loc[mask, "INFLATION_BPS"].mean(), 0) if days else np.nan,
-                "Occurrences": occurrences,
-            }
-        )
+        row = {
+            "Regime": regime,
+            "Days": days,
+            "% of Period": round(100 * days / total_days, 1) if total_days else np.nan,
+            "Avg Spread (bps)": round(sub.loc[mask, "CREDIT_BPS"].mean(), 0) if days else np.nan,
+            "Avg Inflation (bps)": round(sub.loc[mask, "INFLATION_BPS"].mean(), 0) if days else np.nan,
+            "Occurrences": occurrences,
+        }
+        if has_benchmark:
+            row[f"Avg Daily Return ({BENCHMARK_COL}, %)"] = (
+                round(sub.loc[mask, "BENCHMARK_RET"].mean(), 3) if days else np.nan
+            )
+            row[f"Daily Volatility ({BENCHMARK_COL}, %, raw std)"] = (
+                round(sub.loc[mask, "BENCHMARK_RET"].std(), 3) if days else np.nan
+            )
+        rows.append(row)
     return pd.DataFrame(rows).set_index("Regime")
 
 
@@ -386,7 +486,10 @@ def compute_zscore_signal(df, credit_col, inflation_col, lookback: int,
 # ==========================================================================
 
 def render_panel(raw, credit_col, inflation_col, start_date, end_date,
-                  method_label, compute_fn, signal_unit, key_prefix):
+                  method_label, compute_fn, signal_unit, key_prefix,
+                  benchmark_ret: pd.Series | None = None,
+                  benchmark_prices: pd.Series | None = None,
+                  sector_df: pd.DataFrame | None = None):
     st.markdown(f"### {method_label}")
 
     def _compact_lookback(container, label, widget_key):
@@ -422,6 +525,13 @@ def render_panel(raw, credit_col, inflation_col, start_date, end_date,
     m3.metric(f"Inflation Signal ({signal_unit})", f"{cur['INFLATION_SIGNAL']:.2f}")
     m4.metric("Days in Current Regime", int(cur["Days_in_regime"]))
 
+    if pd.notna(cur.get("Credit_Confidence")) and pd.notna(cur.get("Inflation_Confidence")):
+        st.caption(
+            f"اطمینانِ HMM برای برچسبِ امروز — اعتبار: **{cur['Credit_Confidence']:.0%}** · "
+            f"تورم: **{cur['Inflation_Confidence']:.0%}** (احتمالِ فیلترشده‌ی همون حالتی که با argmax "
+            "انتخاب شده؛ هرچی به ۱۰۰٪ نزدیک‌تر، مرزِ تشخیص کمتر مبهمه؛ نزدیکِ ۵۰٪ یعنی امروز دقیقاً لبه‌ی مرزه)."
+        )
+
     if train_end is not None:
         st.caption(
             f"HMM fit window: start → {train_end.date()} (train, {int(TRAIN_FRAC*100)}٪). "
@@ -449,10 +559,18 @@ def render_panel(raw, credit_col, inflation_col, start_date, end_date,
 
     # ---- نمودار سیگنال + رنگ‌آمیزی رژیم (خط و واحد متناسب با روش) ----
     fig = go.Figure()
+    # این دو خط کمرنگ‌تر شدن (opacity) تا خط SP500 که اضافه شده برجسته‌تر دیده بشه.
     fig.add_trace(go.Scatter(x=valid.index, y=valid["CREDIT_SIGNAL"], name=f"Credit {method_label} ({signal_unit})",
-                              line=dict(color="#2f9bd6", width=1)))
+                              line=dict(color="#2f9bd6", width=1), opacity=0.35))
     fig.add_trace(go.Scatter(x=valid.index, y=valid["INFLATION_SIGNAL"], name=f"Inflation {method_label} ({signal_unit})",
-                              yaxis="y2", line=dict(color="#e8a33d", width=1)))
+                              yaxis="y2", line=dict(color="#e8a33d", width=1), opacity=0.35))
+
+    # ---- SP500 (فقط close، لگاریتمی) روی محور سوم مستقل — بی‌صدا حذف می‌شه اگه ستون نباشه ----
+    has_sp500 = benchmark_prices is not None and not benchmark_prices.empty
+    if has_sp500:
+        sp_aligned = benchmark_prices.reindex(valid.index)
+        fig.add_trace(go.Scatter(x=valid.index, y=sp_aligned, name=f"{BENCHMARK_COL} Close",
+                                  yaxis="y3", line=dict(color="#f4f4f4", width=1.8)))
 
     prev, seg_start = None, valid.index[0]
     for date, regime in valid["Regime"].items():
@@ -474,12 +592,32 @@ def render_panel(raw, credit_col, inflation_col, start_date, end_date,
         yaxis2=dict(title=f"Inflation {method_label} ({signal_unit})", overlaying="y", side="right"),
         template="plotly_dark", height=380, margin=dict(l=10, r=10, t=10, b=10),
         legend=dict(orientation="h", y=1.1),
+        **({"yaxis3": dict(overlaying="y", side="right", showticklabels=False, showgrid=False,
+                            zeroline=False, type="log")} if has_sp500 else {}),
     )
     st.plotly_chart(fig, use_container_width=True, key=f"{key_prefix}_chart")
 
     # ---- آمار رژیم (کل تاریخچه، بدون توجه به مرز train/test) ----
     with st.expander(f"📊 Regime Statistics — {method_label} (Selected Range)", expanded=False):
-        st.dataframe(regime_statistics(valid), use_container_width=True)
+        if benchmark_ret is not None and not benchmark_ret.empty:
+            bench_sub = benchmark_ret.reindex(valid.index)
+            st.caption(
+                f"مرجع مقایسه — میانگین بازدهی روزانه‌ی {BENCHMARK_COL} در کل بازه‌ی انتخابی "
+                f"(بدون تفکیک رژیم): **{bench_sub.mean():.3f}٪** · نوسان روزانه: **{bench_sub.std():.3f}٪**."
+            )
+        st.dataframe(regime_statistics(valid, benchmark_ret), use_container_width=True)
+
+    # ---- میانگین بازدهی روزانه‌ی هر زیربخش در هر رژیم ----
+    if sector_df is not None and not sector_df.empty:
+        with st.expander(
+            f"🏭 میانگین بازدهی روزانه‌ی هر زیربخش در هر رژیم — {method_label} (Selected Range)",
+            expanded=False,
+        ):
+            sec_stats = sector_regime_returns(valid, sector_df)
+            if sec_stats.empty:
+                st.caption("داده‌ای برای محاسبه موجود نیست.")
+            else:
+                st.dataframe(sec_stats, use_container_width=True)
 
 
 # ==========================================================================
@@ -585,15 +723,22 @@ def show() -> None:
     mc2.markdown("🔴 **Stagflation** — Spreads widening + inflation up")
     mc2.markdown("🔵 **Recession** — Spreads widening + inflation down")
 
+    # ---- داده‌ی «بازدهی/نوسان هر رژیم» و «بازدهی هر زیربخش» — پورت‌شده از model1 ----
+    benchmark_prices = load_benchmark(str(DB_PATH), os.path.getmtime(DB_PATH))
+    benchmark_ret = benchmark_prices.pct_change().mul(100) if not benchmark_prices.empty else pd.Series(dtype=float)
+    sector_df = load_sector_prices(str(DB_PATH), os.path.getmtime(DB_PATH))
+
     st.divider()
     render_panel(raw, credit_col, inflation_col, start_date, end_date,
                  method_label="Rate of Change", compute_fn=compute_roc_signal,
-                 signal_unit="bps", key_prefix="roc")
+                 signal_unit="bps", key_prefix="roc",
+                 benchmark_ret=benchmark_ret, benchmark_prices=benchmark_prices, sector_df=sector_df)
 
     st.divider()
     render_panel(raw, credit_col, inflation_col, start_date, end_date,
                  method_label="Z-Score", compute_fn=compute_zscore_signal,
-                 signal_unit="σ", key_prefix="z")
+                 signal_unit="σ", key_prefix="z",
+                 benchmark_ret=benchmark_ret, benchmark_prices=benchmark_prices, sector_df=sector_df)
 
     st.caption(
         f"Source: {DB_PATH} (read-only) | Generated {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}"

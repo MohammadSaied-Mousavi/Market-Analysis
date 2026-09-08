@@ -16,7 +16,7 @@ def show() -> None:
             "Model 2 - Credit & Inflation Regime Dashboard + HMM",
             "Model 3",
             "Model 4",
-            "Model 5",
+            "Model 5 - eco3min",
             "Model 6 - Markov-Switching Regime"
         ]
     )
@@ -35,7 +35,7 @@ def show() -> None:
     elif model == "Model 4":
         regime_model4.show()
 
-    elif model == "Model 5":
+    elif model == "Model 5 - eco3min":
         regime_model5.show()
 
     elif model == "Model 6 - Markov-Switching Regime":

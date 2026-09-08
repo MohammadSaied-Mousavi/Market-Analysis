@@ -53,12 +53,30 @@ REGIME_MAP = {
     ("bearish", "high_var"): "Decline",
     ("bearish", "low_var"): "Distribution",
 }
+REGIME_ORDER = ["Advance", "Accumulation", "Decline", "Distribution"]
 
 REGIME_COLORS = {
     "Advance": "#4caf50",
     "Accumulation": ACCENT,
     "Decline": "#d9534f",
     "Distribution": "#4a90d9",
+}
+
+# همون ۱۲ شاخص بخشی که برای model1 استفاده کردیم — universe یکسان،
+# تا نتیجه‌ها بین صفحات قابل‌مقایسه بمونن.
+SECTOR_COLUMNS = {
+    "RSP": "هم‌وزن",
+    "XLK": "فناوری",
+    "XLF": "مالی",
+    "XLV": "بهداشت‌ودرمان",
+    "XLE": "انرژی",
+    "XLY": "مصرفی اختیاری",
+    "XLP": "مصرفی اساسی",
+    "XLB": "مواد اولیه",
+    "XLU": "خدمات عمومی",
+    "XLRE": "املاک",
+    "XLC": "ارتباطات",
+    "GDX": "طلا (معادن)",
 }
 
 
@@ -109,6 +127,20 @@ def _keltner_filter(price, tma, trend_regime, atr, mult) -> pd.Series:
     return confirmed
 
 
+def _days_in_state(state_series: pd.Series) -> pd.Series:
+    counts, run, prev = [], 0, None
+    for v in state_series.tolist():
+        if pd.isna(v):
+            run = 0
+        elif v == prev:
+            run += 1
+        else:
+            run = 1
+        counts.append(run)
+        prev = v if pd.notna(v) else prev
+    return pd.Series(counts, index=state_series.index)
+
+
 def _regime_transition_lookup(res, low_var_state: int, high_var_state: int) -> dict:
     """
     dict با کلید (from_label, to_label) -> احتمال گذار، بر چسب‌های
@@ -128,80 +160,8 @@ def _regime_transition_lookup(res, low_var_state: int, high_var_state: int) -> d
     return {(label[frm], label[to]): prob for (frm, to), prob in raw.items()}
 
 
-def _regime_transition_lookup(res, low_var_state: int, high_var_state: int) -> dict:
-    """
-    p[i->j] در statsmodels یعنی احتمال گذار *از* رژیم i *به* رژیم j
-    (تأییدشده از مستندات رسمی). این رو به یه دیکشنری با کلید
-    ("low_var"/"high_var", "low_var"/"high_var") تبدیل می‌کنه تا
-    مستقل از اینکه کدوم state داخلی (۰ یا ۱) کم‌نوسانه، قابل‌استفاده
-    باشه.
-    """
-    p00 = res.params["p[0->0]"]  # P(بعدی=۰ | قبلی=۰)
-    p10 = res.params["p[1->0]"]  # P(بعدی=۰ | قبلی=۱)
-    raw = {
-        (0, 0): p00,
-        (0, 1): 1 - p00,
-        (1, 0): p10,
-        (1, 1): 1 - p10,
-    }
-    label = {low_var_state: "low_var", high_var_state: "high_var"}
-    return {(label[frm], label[to]): prob for (frm, to), prob in raw.items()}
-
-
-def _one_step_forecast(prob_high_today: float, transition: dict) -> float:
-    """با احتمال فعلی + ماتریس انتقال، احتمال پرنوسان بودنِ روز بعد رو حساب می‌کنه."""
-    prob_low_today = 1 - prob_high_today
-    return (
-        prob_low_today * transition[("low_var", "high_var")]
-        + prob_high_today * transition[("high_var", "high_var")]
-    )
-
-
-@st.cache_data(show_spinner="در حال fit والک‌فوروارد...")
-def fit_walkforward_point(db_path: str, mtime: float, return_kind: str, cutoff: int) -> dict:
-    """
-    یه fit کاملاً جدا و مستقل، فقط با داده‌ی تا (آخرین روز - cutoff).
-    یعنی برای cutoff=1 (دیروز)، مدل اصلاً داده‌ی امروز رو نمی‌بینه؛
-    برای cutoff=2 (دو روز پیش)، نه دیروز نه امروز رو نمی‌بینه.
-    """
-    ohlc = pd.read_csv(db_path, usecols=["Date", CLOSE_COL])
-    ohlc["Date"] = pd.to_datetime(ohlc["Date"])
-    ohlc = ohlc.set_index("Date").sort_index()
-
-    log_ret_full = _to_returns(ohlc[CLOSE_COL], kind=return_kind)
-    ret_slice = log_ret_full.iloc[: len(log_ret_full) - cutoff]
-
-    model = MarkovRegression(
-        ret_slice, k_regimes=2, trend="c", switching_trend=False, switching_variance=True
-    )
-    res = model.fit()
-
-    sigma2 = [res.params[f"sigma2[{i}]"] for i in range(2)]
-    low_var_state = int(np.argmin(sigma2))
-    high_var_state = 1 - low_var_state
-
-    smoothed = res.smoothed_marginal_probabilities
-    prob_high = float(smoothed[high_var_state].iloc[-1])  # آخرین نقطه‌ی همین برش؛ smoothed=filtered اینجا
-    label = "high_var" if prob_high > 0.5 else "low_var"
-
-    transition = _regime_transition_lookup(res, low_var_state, high_var_state)
-    prob_high_next = _one_step_forecast(prob_high, transition)
-
-    return {
-        "date": ret_slice.index[-1],
-        "label": label,
-        "prob_high": prob_high,
-        "prob_low": 1 - prob_high,
-        "transition": transition,
-        "prob_high_next": prob_high_next,
-        "prob_low_next": 1 - prob_high_next,
-        "log_return": float(ret_slice.iloc[-1]),
-    }
-
-
 # ==========================================================================
-# پایپ‌لاین کامل — کش‌شده با mtime (بدون آندرلاین، تا واقعاً در هش
-# محاسبه بشه و با تغییر فایل invalidate بشه). همیشه روی کل تاریخچه.
+# پایپ‌لاین کامل — کش‌شده با mtime. همیشه روی کل تاریخچه.
 # ==========================================================================
 
 @st.cache_data(show_spinner="در حال فیت مدل Markov-Switching...")
@@ -250,9 +210,14 @@ def run_pipeline(db_path: str, mtime: float, return_kind: str = "log"):
     low_cont = _continuous(low_full)
 
     tma = _triangular_ma(close_cont, TMA_WINDOW)
+    # هشدار: عدد > NaN همیشه False برمی‌گرده (نه NaN)، پس np.where بدون این
+    # فیکس، کل دوره‌ی warm-up ی TMA (~۲۵۰ روز اول) رو بی‌صدا "bearish" می‌کرد،
+    # حتی اگه قیمت واقعاً صعودی بود. اینجا صریحاً NaN نگه داشته می‌شه تا اون
+    # دوره از تحلیل حذف بشه (نه اشتباه برچسب بخوره).
     trend_regime = pd.Series(
         np.where(close_cont > tma, "bullish", "bearish"), index=close_cont.index
     )
+    trend_regime[tma.isna()] = np.nan
 
     atr = _average_true_range(high_cont, low_cont, close_cont, ATR_WINDOW)
     trend_confirmed = _keltner_filter(close_cont, tma, trend_regime, atr, KELTNER_MULT)
@@ -261,6 +226,7 @@ def run_pipeline(db_path: str, mtime: float, return_kind: str = "log"):
     combined["final_regime"] = combined.apply(
         lambda r: REGIME_MAP.get((r["trend_regime"], r["variance_regime"]), np.nan), axis=1
     )
+    combined["days_in_regime"] = _days_in_state(combined["final_regime"])
     combined = combined.join(log_ret.rename("log_return"), how="inner")
     combined = combined.join(close_cont.rename("close"), how="left")
     combined = combined.join(tma.rename("tma"), how="left")
@@ -293,9 +259,6 @@ def fit_walkforward_point(db_path: str, mtime: float, return_kind: str, cutoff: 
     """
     مدل رو *از نو*، فقط با داده‌ی تا (آخرین روز - cutoff) فیت می‌کنه —
     یعنی cutoff روز آخر کلاً از ورودی مدل حذف می‌شن، نه فقط از نمایش.
-    برای cutoff=1 (دیروز، بدون دیدن امروز) و cutoff=2 (دو روز پیش،
-    بدون دیدن دیروز/امروز) استفاده می‌شه. cutoff=0 نیازی نداره چون
-    دقیقاً همون run_pipeline اصلیه.
     """
     ohlc = pd.read_csv(db_path, usecols=["Date", CLOSE_COL, HIGH_COL, LOW_COL])
     ohlc["Date"] = pd.to_datetime(ohlc["Date"])
@@ -314,7 +277,7 @@ def fit_walkforward_point(db_path: str, mtime: float, return_kind: str, cutoff: 
     high_var_state = 1 - low_var_state
 
     smoothed = res.smoothed_marginal_probabilities
-    prob_high = float(smoothed[high_var_state].iloc[-1])  # آخرین نقطه‌ی همین برش -> smoothed=filtered
+    prob_high = float(smoothed[high_var_state].iloc[-1])
     prob_low = 1.0 - prob_high
     label = "high_var" if prob_high > 0.5 else "low_var"
 
@@ -330,6 +293,20 @@ def fit_walkforward_point(db_path: str, mtime: float, return_kind: str, cutoff: 
         "prob_high_next": prob_high_next,
         "log_return": float(ret_slice.iloc[-1]),
     }
+
+
+@st.cache_data(show_spinner=False)
+def load_sector_prices(path: str, mtime: float) -> pd.DataFrame:
+    available = pd.read_csv(path, nrows=0).columns
+    cols = [c for c in SECTOR_COLUMNS if c in available]
+    if not cols:
+        return pd.DataFrame()
+    df = pd.read_csv(path, usecols=["Date"] + cols)
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df.set_index("Date").sort_index()
+    for c in cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
 
 
 def _render_snapshot_block(container, title: str, date, var_label: str, trend_label: str,
@@ -358,6 +335,147 @@ def _render_snapshot_block(container, title: str, date, var_label: str, trend_la
     )
     container.markdown(f"پیش‌بینی برای **{next_title}**: احتمال پرنوسان‌بودن = **{prob_high_next:.0%}**")
     container.divider()
+
+
+def render_asset_class_behaviour(combined: pd.DataFrame, sector_df: pd.DataFrame, sp500_stats: pd.DataFrame) -> None:
+    """
+    معادل بخش «Asset Class Behaviour» (Table 4) مقاله‌ی SSRN 3144169 —
+    میانگین بازدهی هر شاخص، روی *کل* روزهایی که در طول تاریخچه در هر
+    رژیم بودیم (نه فقط یک اپیزود)، برای مقایسه‌ی مستقیم با جدول مقاله.
+    """
+    st.markdown("### 📚 Asset Class Behaviour (معادل Table 4 مقاله)")
+    st.caption(
+        "میانگین بازدهی روزانه‌ی هر دارایی، شرطی بر رژیمی که آن روز در آن بودیم — "
+        "روی کل تاریخچه (نه فقط اپیزود اخیر)."
+    )
+
+    if sector_df.empty:
+        st.warning("هیچ‌کدوم از ستون‌های شاخص بخشی توی دیتابیس نیستن.")
+        return
+
+    rows = []
+
+    sp500_row = {"دارایی": "SP500 (خودِ مدل)"}
+    for regime in REGIME_ORDER:
+        sp500_row[regime] = sp500_stats["mean_daily_return_pct"].get(regime, np.nan)
+    rows.append(sp500_row)
+
+    sector_ret = sector_df.apply(lambda s: _to_returns(s, kind="log"))
+    for ticker, name in SECTOR_COLUMNS.items():
+        if ticker not in sector_ret.columns:
+            continue
+        merged = combined[["final_regime"]].join(sector_ret[ticker].rename("ret"), how="inner")
+        by_regime = merged.groupby("final_regime")["ret"].mean() * 100
+        row = {"دارایی": f"{ticker} ({name})"}
+        for regime in REGIME_ORDER:
+            row[regime] = by_regime.get(regime, np.nan)
+        rows.append(row)
+
+    table = pd.DataFrame(rows).set_index("دارایی")
+    st.dataframe(
+        table.style.format("{:+.3f}%", na_rep="—").background_gradient(
+            cmap="RdYlGn", axis=None, vmin=-0.15, vmax=0.15
+        ),
+        use_container_width=True,
+    )
+
+
+def render_current_episode_sectors(combined: pd.DataFrame, sector_df: pd.DataFrame) -> None:
+    """بازدهی هر شاخص بخشی، فقط از شروع اپیزودِ رژیم فعلی تا امروز."""
+    n_current = int(combined["days_in_regime"].iloc[-1])
+    current_regime_name = combined["final_regime"].iloc[-1]
+    start_idx = max(len(combined) - n_current, 0)
+    start_date = combined.index[start_idx]
+    end_date = combined.index[-1]
+
+    st.markdown(f"### 🔥 عملکرد بخشی در رژیم فعلی — {current_regime_name}")
+    st.caption(f"{n_current} روزه توی این رژیم هستیم — از {start_date.date()} تا {end_date.date()}")
+
+    if sector_df.empty:
+        st.warning("ستون‌های شاخص بخشی توی دیتابیس نیستن.")
+        return
+
+    idx = sector_df.index
+    pos_start = idx.searchsorted(start_date)
+    pos_base = max(pos_start - 1, 0)
+    base_prices = sector_df.iloc[pos_base]
+    end_prices = sector_df.loc[:end_date].iloc[-1]
+    ret = ((end_prices / base_prices - 1) * 100).dropna().sort_values(ascending=False)
+
+    if ret.empty:
+        st.warning("داده‌ی کافی برای این بازه نیست.")
+        return
+
+    labels = [f"{t} ({SECTOR_COLUMNS.get(t, t)})" for t in ret.index]
+    colors = ["#4caf50" if v >= 0 else "#d9534f" for v in ret.values]
+    fig = go.Figure(go.Bar(
+        x=ret.values, y=labels, orientation="h", marker_color=colors,
+        text=[f"{v:+.1f}%" for v in ret.values], textposition="outside",
+    ))
+    fig.update_layout(
+        template="plotly_dark", height=420,
+        margin=dict(l=10, r=60, t=10, b=10),
+        yaxis=dict(autorange="reversed"),
+    )
+    st.plotly_chart(fig, use_container_width=True, key="model6_current_episode_sectors")
+
+
+def render_regime_correlation(combined: pd.DataFrame, sector_df: pd.DataFrame) -> None:
+    """معادل Figure 8 مقاله — ماتریس همبستگیِ بازدهی روزانه، جدا برای هر رژیم.
+
+    توجه: این بخش فقط روزهایی رو حساب می‌کنه که هم SP500 هم حداقل یکی از
+    ETFهای بخشی داده داشته باشن. چون بیشتر ETFهای بخشی (مثلاً XLC از ۲۰۱۸،
+    XLRE از ۲۰۱۵، حتی XLK/XLF/... از دسامبر ۱۹۹۸) خیلی دیرتر از SP500 راه
+    افتادن، اگه SP500 توی دیتابیس شما تاریخچه‌ی قدیمی‌تر داشته باشه، تعداد
+    کل روزهای این بخش کمتر از باکس‌های «توزیع رژیم نهایی» بالای صفحه
+    می‌شه — این طبیعیه (محدودیت داده، نه باگ)، برای همین صریح نشونش می‌دیم.
+    """
+    st.markdown("### 🔗 ماتریس همبستگی به‌ازای هر رژیم (معادل Figure 8 مقاله)")
+    st.caption("همبستگی بازدهی روزانه‌ی SP500 و شاخص‌های بخشی، فقط روی روزهایی که در همون رژیم بودیم.")
+
+    if sector_df.empty:
+        st.warning("ستون‌های شاخص بخشی توی دیتابیس نیستن.")
+        return
+
+    sector_ret = sector_df.apply(lambda s: _to_returns(s, kind="log"))
+    all_ret = sector_ret.join(combined["log_return"].rename("SP500"), how="inner")
+    all_ret = all_ret.join(combined["final_regime"], how="inner")
+    all_ret = all_ret.dropna(subset=["final_regime"])
+
+    if all_ret.empty:
+        st.warning("داده‌ی مشترکی بین SP500 و شاخص‌های بخشی پیدا نشد.")
+        return
+
+    st.caption(
+        f"⚠️ این بخش محدود به بازه‌ایه که داده‌ی بخشی هم موجوده: "
+        f"{all_ret.index.min().date()} تا {all_ret.index.max().date()} "
+        f"({len(all_ret):,} روز) — کمتر از تاریخچه‌ی کامل SP500 در باکس‌های بالا، "
+        f"چون بیشتر ETFهای بخشی (XLK/XLF/... از ۱۹۹۸، RSP از ۲۰۰۳، GDX از ۲۰۰۶، "
+        f"XLRE از ۲۰۱۵، XLC از ۲۰۱۸) دیرتر از SP500 راه افتادن."
+    )
+
+    cols_order = ["SP500"] + [t for t in SECTOR_COLUMNS if t in sector_ret.columns]
+
+    grid = st.columns(2)
+    for i, regime in enumerate(REGIME_ORDER):
+        subset = all_ret[all_ret["final_regime"] == regime][cols_order].dropna(axis=1, how="all")
+        n = len(subset)
+        with grid[i % 2]:
+            if n < 30 or subset.shape[1] < 2:
+                st.warning(f"{regime}: داده‌ی کافی نیست ({n} روز)")
+                continue
+            corr = subset.corr()
+            fig = go.Figure(data=go.Heatmap(
+                z=corr.values, x=list(corr.columns), y=list(corr.columns),
+                colorscale="RdBu", zmid=0, zmin=-1, zmax=1,
+                text=corr.round(2).values, texttemplate="%{text}",
+            ))
+            fig.update_layout(
+                title=f"{regime} ({n} روز)",
+                template="plotly_dark", height=420,
+                margin=dict(l=10, r=10, t=40, b=10),
+            )
+            st.plotly_chart(fig, use_container_width=True, key=f"model6_corr_{regime}")
 
 
 # ==========================================================================
@@ -421,7 +539,6 @@ def show() -> None:
     with col_panel:
         combined = result["combined"]
 
-        # امروز — از همون run_pipeline اصلی، بدون فیت مجدد
         today_date = combined.index[-1]
         today_var_label = combined["variance_regime"].iloc[-1]
         today_trend_label = combined["trend_regime"].iloc[-1]
@@ -432,7 +549,6 @@ def show() -> None:
             "فردا", today_return,
         )
 
-        # دیروز و دو روز پیش — با فیت کاملاً جداگانه (walk-forward واقعی)
         yesterday = fit_walkforward_point(DB_PATH, os.path.getmtime(DB_PATH), return_kind, 1)
         yesterday_trend_label = combined["trend_regime"].loc[yesterday["date"]]
         _render_snapshot_block(
@@ -453,9 +569,13 @@ def show() -> None:
 
     # ---- توزیع ۴ رژیم نهایی ----
     st.markdown("### توزیع رژیم نهایی")
+    st.caption(
+        f"روی کل تاریخچه‌ی SP500 توی دیتابیس ({result['date_start'].date()} تا {result['date_end'].date()}) — "
+        "شاخص‌های بخشی معمولاً دیرتر شروع شدن، پس جدول‌های همبستگیِ پایین‌تر صفحه بازه‌ی کوتاه‌تری رو پوشش می‌دن."
+    )
     counts = result["combined"]["final_regime"].value_counts()
     cols = st.columns(len(REGIME_MAP.values()))
-    for col, name in zip(cols, ["Advance", "Accumulation", "Decline", "Distribution"]):
+    for col, name in zip(cols, REGIME_ORDER):
         n = int(counts.get(name, 0))
         col.markdown(
             f"""
@@ -471,31 +591,48 @@ def show() -> None:
 
     st.divider()
 
-    # ---- جدول آماری (معادل Table 3 مقاله) ----
-    st.markdown("### آمار بازدهی هر رژیم (معادل Table 3 مقاله)")
+    sector_df = load_sector_prices(DB_PATH, os.path.getmtime(DB_PATH))
+
+    # ---- عملکرد بخشی در رژیم فعلی ----
+    render_current_episode_sectors(result["combined"], sector_df)
+
+    st.divider()
+
+    # ---- جدول آماری SP500 (معادل Table 3 مقاله) ----
+    st.markdown("### آمار بازدهی هر رژیم — SP500 (معادل Table 3 مقاله)")
     st.dataframe(result["stats"], use_container_width=True)
+
+    st.divider()
+
+    # ---- Asset Class Behaviour (معادل Table 4 مقاله) ----
+    render_asset_class_behaviour(result["combined"], sector_df, result["stats"])
+
+    st.divider()
+
+    # ---- ماتریس همبستگی به‌ازای هر رژیم (معادل Figure 8 مقاله) ----
+    render_regime_correlation(result["combined"], sector_df)
 
     st.divider()
 
     # ---- نمودار قیمت + رنگ‌آمیزی رژیم ----
     st.markdown("### قیمت S&P500 با رنگ‌آمیزی رژیم")
-    combined = result["combined"].dropna(subset=["final_regime"])
+    combined_plot = result["combined"].dropna(subset=["final_regime"])
 
     fig = go.Figure()
     fig.add_trace(
-        go.Scatter(x=combined.index, y=combined["close"], name="SP500 Close", line=dict(color="#e8e8e8", width=1))
+        go.Scatter(x=combined_plot.index, y=combined_plot["close"], name="SP500 Close", line=dict(color="#e8e8e8", width=1))
     )
     fig.add_trace(
-        go.Scatter(x=combined.index, y=combined["tma"], name="TMA (250d)", line=dict(color="#888", width=1, dash="dot"))
+        go.Scatter(x=combined_plot.index, y=combined_plot["tma"], name="TMA (250d)", line=dict(color="#888", width=1, dash="dot"))
     )
 
-    prev, seg_start = None, combined.index[0]
-    for date, regime in combined["final_regime"].items():
+    prev, seg_start = None, combined_plot.index[0]
+    for date, regime in combined_plot["final_regime"].items():
         if regime != prev:
             if prev is not None:
                 fig.add_vrect(x0=seg_start, x1=date, fillcolor=REGIME_COLORS[prev], opacity=0.25, line_width=0)
             seg_start, prev = date, regime
-    fig.add_vrect(x0=seg_start, x1=combined.index[-1], fillcolor=REGIME_COLORS[prev], opacity=0.25, line_width=0)
+    fig.add_vrect(x0=seg_start, x1=combined_plot.index[-1], fillcolor=REGIME_COLORS[prev], opacity=0.25, line_width=0)
 
     fig.update_layout(
         template="plotly_dark",
