@@ -4,7 +4,12 @@ import numpy as np
 import plotly.graph_objects as go
 from theme import inject_global_style
 from pathlib import Path
+from statistics import NormalDist
 
+CORRELATION_METHODS = {
+    "Pearson": "pearson",
+    "Spearman": "spearman",
+}
 # ==========================================================
 # Database Path (فقط خواندن — هیچ‌چیز اینجا نوشته نمی‌شود)
 # ==========================================================
@@ -153,17 +158,16 @@ def sidebar():
         list(LAG_RANGE.keys()),
         index=1
     )
+    method_name = st.sidebar.selectbox("Correlation Method", list(CORRELATION_METHODS.keys()))
 
-    start_date = st.sidebar.date_input(
-        "Start Date",
-        pd.Timestamp("2019-01-01")
-    )
+    start_date = st.sidebar.date_input("Start Date", pd.Timestamp("2019-01-01"))
 
     return (
         TIMEFRAMES[timeframe_name],
         WINDOWS[window_name],
         LAG_RANGE[lag_range_name],
-        start_date
+        start_date,
+        CORRELATION_METHODS[method_name],
     )
 
 
@@ -271,20 +275,114 @@ def asset_selector(returns):
     return asset1, asset2
 
 
+def _rank_rows(arr):
+    """رتبه‌بندی هر ردیف (پنجره) به‌طور مستقل، وکتورایزشده با numpy —
+    بدون حلقه‌ی پایتونی روی هر پنجره."""
+    order = np.argsort(arr, axis=1, kind="mergesort")
+    ranks = np.empty_like(order, dtype=float)
+    row_idx = np.arange(arr.shape[0])[:, None]
+    ranks[row_idx, order] = np.arange(arr.shape[1])
+    return ranks
+
+
+def _rolling_correlation(series1, series2, window, method="pearson"):
+    """Rolling correlation. Pearson از rolling().corr() سریع و بومیِ pandas
+    استفاده می‌کنه. Spearman با numpy sliding-window + رتبه‌بندی وکتورایزشده
+    محاسبه می‌شه (نه حلقه‌ی پایتونی)، برای سرعت قابل‌قبول روی تاریخچه‌ی طولانی."""
+
+    if method == "pearson":
+        return series1.rolling(window).corr(series2)
+
+    combined = pd.concat([series1, series2], axis=1).dropna()
+    combined.columns = ["a", "b"]
+
+    n = len(combined)
+    if n < window:
+        return pd.Series(dtype=float)
+
+    from numpy.lib.stride_tricks import sliding_window_view
+
+    windows_a = sliding_window_view(combined["a"].to_numpy(), window)
+    windows_b = sliding_window_view(combined["b"].to_numpy(), window)
+
+    ranks_a = _rank_rows(windows_a)
+    ranks_b = _rank_rows(windows_b)
+
+    a_dev = ranks_a - ranks_a.mean(axis=1, keepdims=True)
+    b_dev = ranks_b - ranks_b.mean(axis=1, keepdims=True)
+
+    numerator = (a_dev * b_dev).sum(axis=1)
+    denominator = np.sqrt((a_dev ** 2).sum(axis=1) * (b_dev ** 2).sum(axis=1))
+
+    with np.errstate(invalid="ignore", divide="ignore"):
+        corr = np.where(denominator != 0, numerator / denominator, np.nan)
+
+    index = combined.index[window - 1:]
+    return pd.Series(corr, index=index)
+
+
+def historical_correlation(returns, asset1, asset2, window, method="pearson"):
+    st.subheader("Historical Correlation")
+
+    if asset1 == asset2:
+        st.info("Please choose two different assets.")
+        return
+    if asset1 not in returns.columns or asset2 not in returns.columns:
+        return
+
+
+    rolling_corr = _rolling_correlation(returns[asset1], returns[asset2], window, method)
+    rolling_corr = rolling_corr.dropna()
+
+    if rolling_corr.empty:
+        st.warning("Not enough observations.")
+        return
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=rolling_corr.index,
+            y=rolling_corr,
+            mode="lines",
+            name="Rolling Correlation",
+            line=dict(color="#00CC96", width=2),
+        )
+    )
+    fig.add_hline(y=0, line_dash="dash", line_color="gray")
+    fig.add_hline(y=1, line_dash="dot", line_color="green")
+    fig.add_hline(y=-1, line_dash="dot", line_color="red")
+    fig.update_layout(
+        template="plotly_dark",
+        height=650,
+        hovermode="x unified",
+        yaxis=dict(range=[-1.05, 1.05]),
+        xaxis_title="",
+        yaxis_title="Correlation",
+    )
+
+    st.markdown(f"### {asset1} ↔ {asset2} ({method.capitalize()})")
+    st.plotly_chart(fig, use_container_width=True)
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Latest", f"{rolling_corr.iloc[-1]:.2f}")
+    col2.metric("Mean", f"{rolling_corr.mean():.2f}")
+    col3.metric("Maximum", f"{rolling_corr.max():.2f}")
+    col4.metric("Minimum", f"{rolling_corr.min():.2f}")
+    col5.metric("Std", f"{rolling_corr.std():.2f}")
+
 # ==========================================================
 # Correlation Matrix
 # ==========================================================
-def correlation_matrix(returns, window):
+def correlation_matrix(returns, window, method="pearson"):
 
     st.subheader("Correlation Matrix")
+    st.caption(f"Method: {method.capitalize()}")
 
     if len(returns.columns) < 2:
-
         st.warning("Need at least two assets.")
-
         return
 
-    corr = returns.tail(window).corr()
+    corr = returns.tail(window).corr(method=method)
 
     fig = go.Figure(
 
@@ -353,167 +451,195 @@ def correlation_matrix(returns, window):
 # ==========================================================
 # Historical Correlation
 # ==========================================================
-def historical_correlation(
-    returns,
-    asset1,
-    asset2,
-    window
-):
 
-    st.subheader("Historical Correlation")
+def _correlation_confidence(r, n, method="pearson", alpha=0.05, n_tests=1):
+    """
+    فاصله‌ی اطمینان و معنی‌داری آماریِ یه ضریب همبستگی، با تصحیح Bonferroni
+    برای تعداد آزمون‌های هم‌زمان (چون چند تا لگ رو هم‌زمان تست می‌کنیم).
 
-    if asset1 == asset2:
+    - از تبدیل فیشر (Fisher z) استفاده می‌کنه، که استاندارد برای Pearson r ست.
+    - برای Spearman از یه تصحیح تقریبیِ شناخته‌شده (ضریب ۱.۰۶ روی خطای معیار،
+      طبق Fieller et al.) استفاده می‌کنه — این تقریبیه، نه دقیق.
 
-        st.info("Please choose two different assets.")
+    خروجی: (ci_low, ci_high, is_significant)
+    """
+    if n is None or n < 4 or pd.isna(r):
+        return np.nan, np.nan, False
 
-        return
+    r_clipped = float(np.clip(r, -0.999999, 0.999999))
+    z = np.arctanh(r_clipped)
 
-    if asset1 not in returns.columns:
-        return
+    se = 1.0 / np.sqrt(n - 3)
+    if method == "spearman":
+        se *= 1.06
 
-    if asset2 not in returns.columns:
-        return
+    corrected_alpha = alpha / max(n_tests, 1)
+    z_crit = NormalDist().inv_cdf(1 - corrected_alpha / 2)
 
-    rolling_corr = (
+    ci_low = float(np.tanh(z - z_crit * se))
+    ci_high = float(np.tanh(z + z_crit * se))
 
-        returns[asset1]
+    is_significant = not (ci_low <= 0 <= ci_high)
 
-        .rolling(window)
+    return ci_low, ci_high, is_significant
 
-        .corr(
-            returns[asset2]
-        )
 
+
+
+
+    # ======================================================
+    # فاصله‌ی اطمینان + معنی‌داری (تصحیح‌شده با Bonferroni)
+    # ======================================================
+    n_tests = 2 * max_lag + 1
+
+    ci_bounds = lag_df.apply(
+        lambda row: _correlation_confidence(
+            row["Correlation"], row["Observations"], method=method, n_tests=n_tests
+        ),
+        axis=1,
+    )
+    lag_df["CI_Low"] = ci_bounds.apply(lambda t: t[0])
+    lag_df["CI_High"] = ci_bounds.apply(lambda t: t[1])
+    lag_df["Significant"] = ci_bounds.apply(lambda t: t[2])
+
+    # ======================================================
+    # Find the strongest absolute correlation
+    # ======================================================
+    lag_df["AbsCorrelation"] = lag_df["Correlation"].abs()
+    max_abs_corr = lag_df["AbsCorrelation"].max()
+
+    tolerance = 1e-6
+    best_candidates = lag_df[
+        np.isclose(lag_df["AbsCorrelation"], max_abs_corr, atol=tolerance, rtol=tolerance)
+    ].copy()
+
+    best_candidates["AbsLag"] = best_candidates["Lag"].abs()
+    min_abs_lag = best_candidates["AbsLag"].min()
+    best_candidates = best_candidates[best_candidates["AbsLag"] == min_abs_lag].copy()
+
+    candidate_lags = sorted(best_candidates["Lag"].astype(int).tolist())
+
+    # ------------------------------------------------------
+    # حالت ۱: فقط یک Lag
+    # ------------------------------------------------------
+    if len(candidate_lags) == 1:
+        best_lag = candidate_lags[0]
+        best_row = best_candidates.iloc[0]
+        best_corr = float(best_row["Correlation"])
+        observations = int(best_row["Observations"])
+        best_lag_text = f"{best_lag:+d} Days"
+
+        if best_lag > 0:
+            direction_text = f"{asset1} leads {asset2} by {best_lag} day(s)."
+        elif best_lag < 0:
+            direction_text = f"{asset2} leads {asset1} by {abs(best_lag)} day(s)."
+        else:
+            direction_text = "No lead / lag detected. The strongest relationship occurs at lag 0."
+
+    # ------------------------------------------------------
+    # حالت ۲: چند Lag با بهترین correlation
+    # ------------------------------------------------------
+    else:
+        lag_values = candidate_lags
+        symmetric_pairs = [lag for lag in lag_values if lag > 0 and -lag in lag_values]
+
+        if len(symmetric_pairs) > 0:
+            symmetric_lag = min(symmetric_pairs)
+            best_lag_text = f"±{symmetric_lag} Days"
+
+            symmetric_rows = best_candidates[
+                best_candidates["Lag"].isin([-symmetric_lag, symmetric_lag])
+            ]
+            best_corr = float(symmetric_rows["Correlation"].abs().max())
+            observations = int(symmetric_rows["Observations"].min())
+
+            direction_text = (
+                "No clear leader. "
+                f"Both +{symmetric_lag} and -{symmetric_lag} days show an equally strong relationship."
+            )
+        else:
+            best_lag_text = "Multiple Lags"
+            best_corr = float(best_candidates["Correlation"].abs().max())
+            observations = int(best_candidates["Observations"].min())
+
+            direction_text = (
+                "No clear leader. Multiple lags have essentially the same strongest correlation."
+            )
+
+    # ======================================================
+    # چک نهایی: آیا «بهترین» لگ بعد از تصحیح هنوز معنی‌داره؟
+    # ======================================================
+    _, _, best_significant = _correlation_confidence(
+        best_corr, observations, method=method, n_tests=n_tests
     )
 
-    rolling_corr = rolling_corr.dropna()
+    if not best_significant:
+        direction_text += (
+            " ⚠️ حتی بعد از تصحیح برای تعداد لگ‌های تست‌شده (Bonferroni)، این رابطه از نظر "
+            "آماری معنی‌دار نیست — ممکنه صرفاً نویز آماری باشه، نه یه رابطه‌ی واقعی lead/lag."
+        )
 
-    if rolling_corr.empty:
-
-        st.warning("Not enough observations.")
-
-        return
+    # ======================================================
+    # Chart — رنگ سبز = معنی‌دار، خاکستری = مشکوک به نویز
+    # ======================================================
+    bar_colors = ["#00CC96" if sig else "rgba(160,160,160,0.5)" for sig in lag_df["Significant"]]
 
     fig = go.Figure()
 
     fig.add_trace(
+        go.Bar(
+            x=lag_df["Lag"],
+            y=lag_df["Correlation"],
+            name="Correlation",
+            marker_color=bar_colors,
+            customdata=np.stack(
+                [lag_df["Observations"], lag_df["CI_Low"], lag_df["CI_High"]], axis=-1
+            ),
+            hovertemplate=
+            "Lag: %{x} Days<br>"
+            "Correlation: %{y:.4f}<br>"
+            "N: %{customdata[0]}<br>"
+            "95% CI (تصحیح‌شده): [%{customdata[1]:.2f}, %{customdata[2]:.2f}]"
+            "<extra></extra>",
+        )
+    )
 
-        go.Scatter(
+    fig.add_hline(y=0, line_dash="dash", line_color="gray")
+    fig.add_vline(x=0, line_dash="dot", line_color="gray")
 
-            x=rolling_corr.index,
-
-            y=rolling_corr,
-
-            mode="lines",
-
-            name="Rolling Correlation",
-
-            line=dict(
-
-                color="#00CC96",
-
-                width=2
-
-            )
-
+    for lag in candidate_lags:
+        fig.add_vline(
+            x=lag, line_dash="dash", line_color="#00CC96", line_width=2,
+            annotation_text=f"Best {lag:+d}", annotation_position="top",
         )
 
-    )
-
-    fig.add_hline(
-
-        y=0,
-
-        line_dash="dash",
-
-        line_color="gray"
-
-    )
-
-    fig.add_hline(
-
-        y=1,
-
-        line_dash="dot",
-
-        line_color="green"
-
-    )
-
-    fig.add_hline(
-
-        y=-1,
-
-        line_dash="dot",
-
-        line_color="red"
-
-    )
-
     fig.update_layout(
-
-        template="plotly_dark",
-
-        height=650,
-
-        hovermode="x unified",
-
-        yaxis=dict(
-            range=[-1.05, 1.05]
-        ),
-
-        xaxis_title="",
-
-        yaxis_title="Correlation"
-
+        template="plotly_dark", height=600, hovermode="x",
+        xaxis=dict(title="Lag (Days)", dtick=1),
+        yaxis=dict(title="Correlation", range=[-1.05, 1.05]),
     )
 
-    st.markdown(
-        f"### {asset1} ↔ {asset2}"
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.caption(
+        f"🟢 سبز = این لگ حتی بعد از تصحیح Bonferroni (برای {n_tests} تا لگ هم‌زمان) هنوز "
+        "معنی‌داره. ⚪ خاکستری = ممکنه صرفاً نویز آماری باشه."
     )
 
-    st.plotly_chart(
-        fig,
-        use_container_width=True
-    )
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Best Lag", best_lag_text)
+    col2.metric("Best Correlation", f"{best_corr:.2f}")
+    col3.metric("Observations", f"{observations:,}")
 
-    col1, col2, col3, col4, col5 = st.columns(5)
+    st.info(direction_text)
 
-    col1.metric(
-        "Latest",
-        f"{rolling_corr.iloc[-1]:.2f}"
-    )
-
-    col2.metric(
-        "Mean",
-        f"{rolling_corr.mean():.2f}"
-    )
-
-    col3.metric(
-        "Maximum",
-        f"{rolling_corr.max():.2f}"
-    )
-
-    col4.metric(
-        "Minimum",
-        f"{rolling_corr.min():.2f}"
-    )
-
-    col5.metric(
-        "Std",
-        f"{rolling_corr.std():.2f}"
-    )
+    st.caption(f"Lead / Lag calculated using the latest {window} observations.")
 
 
 # ==========================================================
 # Scatter Plot + Regression
 # ==========================================================
-def scatter_correlation(
-    returns,
-    asset1,
-    asset2,
-    window
-):
+def scatter_correlation(returns, asset1, asset2, window, method="pearson"):
 
     st.subheader("Scatter / Regression")
 
@@ -543,7 +669,7 @@ def scatter_correlation(
     x = pair[asset1]
     y = pair[asset2]
 
-    correlation = x.corr(y)
+    correlation = x.corr(y, method=method)
 
     # Linear regression
     slope, intercept = np.polyfit(
@@ -658,112 +784,60 @@ def scatter_correlation(
 
     )
 
-    st.plotly_chart(
-        fig,
-        use_container_width=True
-    )
+    st.plotly_chart(fig, use_container_width=True)
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
 
-    col1.metric(
-        "Correlation",
-        f"{correlation:.2f}"
-    )
+    col1.metric(f"Correlation ({method.capitalize()})", f"{correlation:.2f}")
+    col2.metric("Beta (Slope)", f"{slope:.2f}")
+    col3.metric("R²", f"{r_squared:.2f}" if pd.notna(r_squared) else "N/A")
+    col4.metric("Observations", f"{len(pair):,}")
 
-    col2.metric(
-        "R²",
-        f"{r_squared:.2f}"
-        if pd.notna(r_squared)
-        else "N/A"
-    )
+    if method == "spearman":
+        st.caption(
+            "توجه: Correlation با روش Spearman (رتبه‌ای) محاسبه شده، ولی خط رگرسیون و Beta "
+            "هنوز بر مبنای مقادیر خام (رابطه‌ی خطی) رسم شدن — این دو الزاماً کاملاً هم‌راستا نیستن."
+        )
 
-    col3.metric(
-        "Observations",
-        f"{len(pair):,}"
-    )
-
-    st.caption(
-        f"Using the latest {window} observations with valid data."
-    )
+    st.caption(f"Using the latest {window} observations with valid data.")
 
 
 # ==========================================================
 # Lead / Lag Correlation
 # ==========================================================
-def calculate_lag_correlations(
-    series1,
-    series2,
-    max_lag
-):
+def calculate_lag_correlations(series1, series2, max_lag, method="pearson"):
 
     results = []
-
-    combined = pd.concat(
-        [series1, series2],
-        axis=1
-    )
-
-    combined.columns = [
-        "asset1",
-        "asset2"
-    ]
-
+    combined = pd.concat([series1, series2], axis=1)
+    combined.columns = ["asset1", "asset2"]
     combined = combined.dropna()
 
     if combined.empty:
-
         return pd.DataFrame()
 
-    for lag in range(
-        -max_lag,
-        max_lag + 1
-    ):
+    for lag in range(-max_lag, max_lag + 1):
 
         if lag > 0:
-
-            # Asset 1 leads Asset 2
             x = combined["asset1"].iloc[:-lag]
             y = combined["asset2"].iloc[lag:]
-
         elif lag < 0:
-
-            # Asset 2 leads Asset 1
             lag_abs = abs(lag)
-
             x = combined["asset1"].iloc[lag_abs:]
             y = combined["asset2"].iloc[:-lag_abs]
-
         else:
-
-            # Same-day correlation
             x = combined["asset1"]
             y = combined["asset2"]
 
-        valid = pd.concat(
-            [x, y],
-            axis=1
-        ).dropna()
+        valid = pd.concat([x, y], axis=1).dropna()
 
         if len(valid) < 3:
-
             correlation = np.nan
             observations = 0
-
         else:
-
-            correlation = valid.iloc[:, 0].corr(
-                valid.iloc[:, 1]
-            )
-
+            correlation = valid.iloc[:, 0].corr(valid.iloc[:, 1], method=method)
             observations = len(valid)
 
-        results.append(
-            {
-                "Lag": lag,
-                "Correlation": correlation,
-                "Observations": observations
-            }
-        )
+        results.append({"Lag": lag, "Correlation": correlation, "Observations": observations})
 
     return pd.DataFrame(results)
 
@@ -771,70 +845,36 @@ def calculate_lag_correlations(
 # ==========================================================
 # Lead / Lag Analysis
 # ==========================================================
-# ==========================================================
-# Lead / Lag Analysis
-# ==========================================================
-def lead_lag_analysis(
-    returns,
-    asset1,
-    asset2,
-    window,
-    max_lag
-):
+def lead_lag_analysis(returns, asset1, asset2, window, max_lag, method="pearson"):
 
     st.subheader("Lead / Lag Correlation")
 
     if asset1 == asset2:
-
         st.info("Please choose two different assets.")
-
         return
 
     if asset1 not in returns.columns:
         return
-
     if asset2 not in returns.columns:
         return
 
-    pair = returns[
-        [asset1, asset2]
-    ].dropna()
-
-    # آخرین Window مشاهده
+    pair = returns[[asset1, asset2]].dropna()
     pair = pair.tail(window)
 
     if len(pair) < 3:
-
-        st.warning(
-            "Not enough overlapping observations for lead / lag analysis."
-        )
-
+        st.warning("Not enough overlapping observations for lead / lag analysis.")
         return
 
-    lag_df = calculate_lag_correlations(
-        pair[asset1],
-        pair[asset2],
-        max_lag
-    )
+    lag_df = calculate_lag_correlations(pair[asset1], pair[asset2], max_lag, method=method)
 
     if lag_df.empty:
-
-        st.warning(
-            "Could not calculate lead / lag correlations."
-        )
-
+        st.warning("Could not calculate lead / lag correlations.")
         return
 
-    lag_df = lag_df.dropna(
-        subset=["Correlation"]
-    )
+    lag_df = lag_df.dropna(subset=["Correlation"])
 
     if lag_df.empty:
-
-        st.warning(
-            "Could not calculate valid correlations."
-        )
-
+        st.warning("Could not calculate valid correlations.")
         return
 
     # ======================================================
@@ -1161,7 +1201,8 @@ def show():
         resample_rule,
         window,
         max_lag,
-        start_date
+        start_date,
+        method,
     ) = sidebar()
 
     # ======================================================
@@ -1253,10 +1294,7 @@ def show():
     # ======================================================
     # Correlation Matrix
     # ======================================================
-    correlation_matrix(
-        returns,
-        window
-    )
+    correlation_matrix(returns, window, method)
 
     # ======================================================
     # Asset Selection
@@ -1302,37 +1340,21 @@ def show():
     # ======================================================
     # Historical Correlation
     # ======================================================
-    historical_correlation(
-        returns,
-        asset1,
-        asset2,
-        window
-    )
+    historical_correlation(returns, asset1, asset2, window, method)
 
     st.divider()
 
     # ======================================================
     # Scatter + Regression
     # ======================================================
-    scatter_correlation(
-        returns,
-        asset1,
-        asset2,
-        window
-    )
+    scatter_correlation(returns, asset1, asset2, window, method)
 
     st.divider()
 
     # ======================================================
     # Lead / Lag Analysis
     # ======================================================
-    lead_lag_analysis(
-        returns,
-        asset1,
-        asset2,
-        window,
-        max_lag
-    )
+    lead_lag_analysis(returns, asset1, asset2, window, max_lag, method)
 
 
 # ==========================================================
