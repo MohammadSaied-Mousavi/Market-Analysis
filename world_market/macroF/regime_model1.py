@@ -356,7 +356,56 @@ def sector_regime_returns(valid: pd.DataFrame, sector_df: pd.DataFrame) -> pd.Da
     out.index.name = "Regime"
     return out
 
+def regime_growth_contribution(valid: pd.DataFrame, benchmark_prices: pd.Series):
+    """
+    سهم هر رژیم در رشد کل SP500 طیِ بازه‌ی valid.index — دقیق، نه تقریبی.
+    سهم روزِ t = I(t-1) × بازده‌ی روز t (I = شاخص ترکیبیِ قیمت، شروع از ۱
+    در اولین روزِ بازه). طبق یه اتحاد جبریِ تلسکوپی، مجموع این سهم‌ها روی
+    تمام روزها همیشه دقیقاً برابر رشد کل (P_end/P_start - 1) است؛
+    گروه‌بندی بر اساس رژیم، مجموع را عوض نمی‌کند.
+    """
+    if benchmark_prices is None or benchmark_prices.empty:
+        return None
 
+    prices = benchmark_prices.reindex(valid.index).dropna()
+    if len(prices) < 2:
+        return None
+
+    common_idx = prices.index
+    regime = valid["Regime"].reindex(common_idx)
+
+    daily_rate = prices.pct_change()
+    running_index = (1 + daily_rate.fillna(0)).cumprod()
+    prev_index = running_index.shift(1).fillna(1.0)
+
+    contribution = (prev_index * daily_rate).iloc[1:]
+    regime_for_contrib = regime.iloc[1:]
+
+    total_growth_pct = (prices.iloc[-1] / prices.iloc[0] - 1) * 100
+
+    by_regime = contribution.groupby(regime_for_contrib).sum() * 100
+    by_regime = by_regime.reindex(list(REGIME_INFO.keys())).fillna(0.0)
+
+    return by_regime, total_growth_pct
+
+
+def render_regime_growth_table(valid: pd.DataFrame, benchmark_prices: pd.Series, method_label: str):
+    result = regime_growth_contribution(valid, benchmark_prices)
+    if result is None:
+        return
+
+    by_regime, total_growth_pct = result
+
+    table = pd.DataFrame([by_regime.round(2)], index=["رشد (٪)"])
+    table["مجموع (= رشد کل بازار)"] = round(total_growth_pct, 2)
+
+    st.markdown(f"##### 📈 سهم هر رژیم در رشد {BENCHMARK_COL} — {method_label} (بازه‌ی انتخابی)")
+    st.dataframe(table, use_container_width=True)
+    st.caption(
+        "این تجزیه دقیقه، نه تقریبی: مجموع چهار عدد رژیم همیشه دقیقاً برابر رشد کل بازار در همین "
+        "بازه است (بر اساس یک اتحاد ریاضی، نه گرد‌کردن یا میانگین‌گیری). ستون «مجموع» فقط برای "
+        "مقایسه/چک‌کردن اینجاست."
+    )
 # ==========================================================================
 # 3) طبقه‌بندی رژیم (مشترک بین دو پنل)
 # ==========================================================================
@@ -551,7 +600,7 @@ def render_panel(raw, credit_col, inflation_col, start_date, end_date,
                                         zeroline=False, type="log")
     fig.update_layout(**layout_kwargs)
     st.plotly_chart(fig, use_container_width=True, key=f"{key_prefix}_chart")
-
+    render_regime_growth_table(valid, benchmark_prices, method_label)
     # ---- آمار رژیم (جمع‌شونده) — شامل بازدهی/نوسان روزانه‌ی SP500 اگر موجود باشه ----
     with st.expander(f"📊 Regime Statistics — {method_label} (Selected Range)", expanded=False):
         if benchmark_ret is not None and not benchmark_ret.empty:
