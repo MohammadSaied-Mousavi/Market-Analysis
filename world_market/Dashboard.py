@@ -7,6 +7,7 @@ import subprocess
 
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -229,435 +230,214 @@ def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
 # GENERIC CHANGE
 # ==========================================================
 
-def _latest_valid_change(
-    df: pd.DataFrame,
-    column: str,
-    days: int
-) -> float:
+def _latest_valid_change(df: pd.DataFrame, column: str, days: int, asof: pd.Timestamp | None = None) -> float:
 
     if column not in df.columns:
         return np.nan
 
-    temp = df[
-        ["Date", column]
-    ].dropna(
-        subset=[column]
-    ).copy()
-
+    temp = df[["Date", column]].dropna(subset=[column]).copy()
     if temp.empty:
         return np.nan
 
-    temp["Date"] = pd.to_datetime(
-        temp["Date"],
-        errors="coerce"
-    )
-
-    temp = temp.dropna(
-        subset=["Date"]
-    )
-
+    temp["Date"] = pd.to_datetime(temp["Date"], errors="coerce")
+    temp = temp.dropna(subset=["Date"])
     if temp.empty:
         return np.nan
 
     temp = temp.sort_values("Date")
 
-    latest_date = temp["Date"].iloc[-1]
+    if asof is not None:
+        temp = temp[temp["Date"] <= asof]
+        if temp.empty:
+            return np.nan
 
-    latest_value = pd.to_numeric(
-        temp[column].iloc[-1],
-        errors="coerce"
-    )
+    latest_date = temp["Date"].iloc[-1]
+    latest_value = pd.to_numeric(temp[column].iloc[-1], errors="coerce")
 
     if pd.isna(latest_value):
         return np.nan
 
-    target_date = (
-        latest_date
-        - pd.Timedelta(days=days)
-    )
-
-    prev = temp[
-        temp["Date"] <= target_date
-    ]
+    target_date = latest_date - pd.Timedelta(days=days)
+    prev = temp[temp["Date"] <= target_date]
 
     if prev.empty:
         return np.nan
 
-    prev_value = pd.to_numeric(
-        prev[column].iloc[-1],
-        errors="coerce"
-    )
+    prev_value = pd.to_numeric(prev[column].iloc[-1], errors="coerce")
 
     if pd.isna(prev_value):
         return np.nan
 
-    return float(
-        latest_value - prev_value
-    )
+    return float(latest_value - prev_value)
 
 
-# ==========================================================
-# YOY INFLATION RATE
-# ==========================================================
-
-def _latest_yoy_rate(
-    df: pd.DataFrame,
-    column: str,
-    months: int = 12
-) -> float:
+def _latest_yoy_rate(df: pd.DataFrame, column: str, months: int = 12, asof: pd.Timestamp | None = None) -> float:
 
     if column not in df.columns:
         return np.nan
 
-    temp = df[
-        ["Date", column]
-    ].dropna(
-        subset=[column]
-    ).copy()
-
+    temp = df[["Date", column]].dropna(subset=[column]).copy()
     if temp.empty:
         return np.nan
 
-    temp["Date"] = pd.to_datetime(
-        temp["Date"],
-        errors="coerce"
-    )
-
-    temp[column] = pd.to_numeric(
-        temp[column],
-        errors="coerce"
-    )
-
-    temp = temp.dropna(
-        subset=["Date", column]
-    )
-
+    temp["Date"] = pd.to_datetime(temp["Date"], errors="coerce")
+    temp[column] = pd.to_numeric(temp[column], errors="coerce")
+    temp = temp.dropna(subset=["Date", column])
     temp = temp.sort_values("Date")
 
     if temp.empty:
         return np.nan
 
-    latest_date = temp["Date"].iloc[-1]
+    if asof is not None:
+        temp = temp[temp["Date"] <= asof]
+        if temp.empty:
+            return np.nan
 
+    latest_date = temp["Date"].iloc[-1]
     latest_value = temp[column].iloc[-1]
 
-    target_date = (
-        latest_date
-        - pd.DateOffset(
-            months=months
-        )
-    )
-
-    prev = temp[
-        temp["Date"] <= target_date
-    ]
+    target_date = latest_date - pd.DateOffset(months=months)
+    prev = temp[temp["Date"] <= target_date]
 
     if prev.empty:
         return np.nan
 
     prev_value = prev[column].iloc[-1]
 
-    if pd.isna(prev_value):
+    if pd.isna(prev_value) or prev_value == 0:
         return np.nan
 
-    if prev_value == 0:
-        return np.nan
-
-    return float(
-        (
-            latest_value
-            / prev_value
-            - 1
-        )
-        * 100
-    )
+    return float((latest_value / prev_value - 1) * 100)
 
 
-# ==========================================================
-# YOY RATE AT OFFSET
-# ==========================================================
-
-def _latest_yoy_rate_at_offset(
-    df: pd.DataFrame,
-    column: str,
-    offset_months: int = 3
-) -> float:
+def _latest_yoy_rate_at_offset(df: pd.DataFrame, column: str, offset_months: int = 3, asof: pd.Timestamp | None = None) -> float:
 
     if column not in df.columns:
         return np.nan
 
-    temp = df[
-        ["Date", column]
-    ].dropna(
-        subset=[column]
-    ).copy()
-
+    temp = df[["Date", column]].dropna(subset=[column]).copy()
     if temp.empty:
         return np.nan
 
-    temp["Date"] = pd.to_datetime(
-        temp["Date"],
-        errors="coerce"
-    )
-
-    temp[column] = pd.to_numeric(
-        temp[column],
-        errors="coerce"
-    )
-
-    temp = temp.dropna(
-        subset=["Date", column]
-    )
-
+    temp["Date"] = pd.to_datetime(temp["Date"], errors="coerce")
+    temp[column] = pd.to_numeric(temp[column], errors="coerce")
+    temp = temp.dropna(subset=["Date", column])
     temp = temp.sort_values("Date")
 
     if temp.empty:
         return np.nan
 
+    if asof is not None:
+        temp = temp[temp["Date"] <= asof]
+        if temp.empty:
+            return np.nan
+
     latest_date = temp["Date"].iloc[-1]
+    target_date = latest_date - pd.DateOffset(months=offset_months)
 
-    target_date = (
-        latest_date
-        - pd.DateOffset(
-            months=offset_months
-        )
-    )
-
-    current_candidates = temp[
-        temp["Date"] <= target_date
-    ]
-
+    current_candidates = temp[temp["Date"] <= target_date]
     if current_candidates.empty:
         return np.nan
 
-    current_date = (
-        current_candidates["Date"].iloc[-1]
-    )
+    current_date = current_candidates["Date"].iloc[-1]
+    current_value = current_candidates[column].iloc[-1]
 
-    current_value = (
-        current_candidates[column].iloc[-1]
-    )
-
-    yoy_target = (
-        current_date
-        - pd.DateOffset(
-            months=12
-        )
-    )
-
-    previous_candidates = temp[
-        temp["Date"] <= yoy_target
-    ]
+    yoy_target = current_date - pd.DateOffset(months=12)
+    previous_candidates = temp[temp["Date"] <= yoy_target]
 
     if previous_candidates.empty:
         return np.nan
 
-    previous_value = (
-        previous_candidates[column].iloc[-1]
-    )
+    previous_value = previous_candidates[column].iloc[-1]
 
-    if pd.isna(previous_value):
+    if pd.isna(previous_value) or previous_value == 0:
         return np.nan
 
-    if previous_value == 0:
-        return np.nan
-
-    return float(
-        (
-            current_value
-            / previous_value
-            - 1
-        )
-        * 100
-    )
+    return float((current_value / previous_value - 1) * 100)
 
 
 # ==========================================================
-# GROWTH REGIME
+# GROWTH REGIME and INFLATION REGIME
 # ==========================================================
 
-def detect_growth_regime(df: pd.DataFrame):
+GROWTH_SIGNAL_LABELS = {
+    "cli_3m": "OECD CLI — تغییر ۳ ماهه",
+    "cli_6m": "OECD CLI — تغییر ۶ ماهه",
+    "cfnai_3m": "CFNAI-MA3 — تغییر ۳ ماهه",
+    "gdp_1y": "Real GDP — تغییر ۱ ساله",
+}
 
-    scores = []
 
-    # ------------------------------------------------------
-    # OECD US CLI
-    # ------------------------------------------------------
+def compute_growth_signals(df: pd.DataFrame, asof: pd.Timestamp | None = None) -> dict:
+    """هر سیگنال رشد رو جدا برمی‌گردونه (نه فقط جمعشون) تا بشه دید هرکدوم
+    چقدر مثبت/منفی بوده، نه فقط رأی +۱/−۱ نهایی‌شون."""
 
-    cli_3m = _latest_valid_change(
-        df,
-        "USALOLITOAASTSAM",
-        90
-    )
+    signals = {}
 
-    cli_6m = _latest_valid_change(
-        df,
-        "USALOLITOAASTSAM",
-        180
-    )
-
+    cli_3m = _latest_valid_change(df, "USALOLITOAASTSAM", 90, asof=asof)
     if pd.notna(cli_3m):
-        scores.append(
-            1 if cli_3m > 0 else -1
-        )
+        signals["cli_3m"] = (cli_3m, 1 if cli_3m > 0 else -1)
 
+    cli_6m = _latest_valid_change(df, "USALOLITOAASTSAM", 180, asof=asof)
     if pd.notna(cli_6m):
-        scores.append(
-            1 if cli_6m > 0 else -1
-        )
+        signals["cli_6m"] = (cli_6m, 1 if cli_6m > 0 else -1)
 
-    # ------------------------------------------------------
-    # CFNAI MA3
-    # ------------------------------------------------------
+    cfnai_3m = _latest_valid_change(df, "CFNAIMA3", 90, asof=asof)
+    if pd.notna(cfnai_3m):
+        signals["cfnai_3m"] = (cfnai_3m, 1 if cfnai_3m > 0 else -1)
 
-    cfnaim3_3m = _latest_valid_change(
-        df,
-        "CFNAIMA3",
-        90
-    )
-
-    if pd.notna(cfnaim3_3m):
-        scores.append(
-            1
-            if cfnaim3_3m > 0
-            else -1
-        )
-
-    # ------------------------------------------------------
-    # REAL GDP
-    # ------------------------------------------------------
-
-    gdp_1y = _latest_valid_change(
-        df,
-        "A191RO1Q156NBEA",
-        365
-    )
-
+    gdp_1y = _latest_valid_change(df, "A191RO1Q156NBEA", 365, asof=asof)
     if pd.notna(gdp_1y):
-        scores.append(
-            1 if gdp_1y > 0 else -1
-        )
+        signals["gdp_1y"] = (gdp_1y, 1 if gdp_1y > 0 else -1)
 
-    # ------------------------------------------------------
-    # FALLBACK
-    # ------------------------------------------------------
+    score = sum(s for _, s in signals.values())
+    label = "Growth ?" if not signals else ("Growth ↑" if score > 0 else "Growth ↓")
 
-    if not scores:
-        return "Growth ?"
-
-    score = sum(scores)
-
-    if score > 0:
-        return "Growth ↑"
-
-    return "Growth ↓"
+    return {"signals": signals, "score": score, "label": label}
 
 
-# ==========================================================
-# INFLATION REGIME
-# ==========================================================
+def detect_growth_regime(df: pd.DataFrame, asof: pd.Timestamp | None = None):
+    return compute_growth_signals(df, asof=asof)["label"]
 
-def detect_inflation_regime(df: pd.DataFrame):
 
-    scores = []
+INFLATION_SIGNAL_LABELS = {
+    "cpi_yoy_trend": "Core CPI YoY — روند ۳ ماهه",
+    "pce_yoy_trend": "Core PCE YoY — روند ۳ ماهه",
+    "breakeven_10y": "10Y Breakeven — تغییر ۳ ماهه",
+    "forward_5y5y": "5Y5Y Forward — تغییر ۳ ماهه",
+}
 
-    # ------------------------------------------------------
-    # Core CPI YoY
-    # ------------------------------------------------------
 
-    cpi_now = _latest_yoy_rate(
-        df,
-        "CPILFESL",
-        12
-    )
+def compute_inflation_signals(df: pd.DataFrame, asof: pd.Timestamp | None = None) -> dict:
 
-    cpi_3m_ago = _latest_yoy_rate_at_offset(
-        df,
-        "CPILFESL",
-        3
-    )
+    signals = {}
 
-    if (
-        pd.notna(cpi_now)
-        and pd.notna(cpi_3m_ago)
-    ):
-        scores.append(
-            1
-            if cpi_now > cpi_3m_ago
-            else -1
-        )
+    cpi_now = _latest_yoy_rate(df, "CPILFESL", 12, asof=asof)
+    cpi_3m_ago = _latest_yoy_rate_at_offset(df, "CPILFESL", 3, asof=asof)
+    if pd.notna(cpi_now) and pd.notna(cpi_3m_ago):
+        signals["cpi_yoy_trend"] = (cpi_now - cpi_3m_ago, 1 if cpi_now > cpi_3m_ago else -1)
 
-    # ------------------------------------------------------
-    # Core PCE YoY
-    # ------------------------------------------------------
+    pce_now = _latest_yoy_rate(df, "PCEPILFE", 12, asof=asof)
+    pce_3m_ago = _latest_yoy_rate_at_offset(df, "PCEPILFE", 3, asof=asof)
+    if pd.notna(pce_now) and pd.notna(pce_3m_ago):
+        signals["pce_yoy_trend"] = (pce_now - pce_3m_ago, 1 if pce_now > pce_3m_ago else -1)
 
-    pce_now = _latest_yoy_rate(
-        df,
-        "PCEPILFE",
-        12
-    )
-
-    pce_3m_ago = _latest_yoy_rate_at_offset(
-        df,
-        "PCEPILFE",
-        3
-    )
-
-    if (
-        pd.notna(pce_now)
-        and pd.notna(pce_3m_ago)
-    ):
-        scores.append(
-            1
-            if pce_now > pce_3m_ago
-            else -1
-        )
-
-    # ------------------------------------------------------
-    # 10Y Breakeven
-    # ------------------------------------------------------
-
-    be10 = _latest_valid_change(
-        df,
-        "T10YIE",
-        90
-    )
-
+    be10 = _latest_valid_change(df, "T10YIE", 90, asof=asof)
     if pd.notna(be10):
+        signals["breakeven_10y"] = (be10, 1 if be10 > 0 else -1)
 
-        scores.append(
-            1 if be10 > 0 else -1
-        )
-
-    # ------------------------------------------------------
-    # 5Y5Y Forward Inflation
-    # ------------------------------------------------------
-
-    fwd = _latest_valid_change(
-        df,
-        "T5YIFR",
-        90
-    )
-
+    fwd = _latest_valid_change(df, "T5YIFR", 90, asof=asof)
     if pd.notna(fwd):
+        signals["forward_5y5y"] = (fwd, 1 if fwd > 0 else -1)
 
-        scores.append(
-            1 if fwd > 0 else -1
-        )
+    score = sum(s for _, s in signals.values())
+    label = "Inflation ?" if not signals else ("Inflation ↑" if score > 0 else "Inflation ↓")
 
-    # ------------------------------------------------------
-    # FALLBACK
-    # ------------------------------------------------------
+    return {"signals": signals, "score": score, "label": label}
 
-    if not scores:
-        return "Inflation ?"
 
-    score = sum(scores)
-
-    if score > 0:
-        return "Inflation ↑"
-
-    return "Inflation ↓"
+def detect_inflation_regime(df: pd.DataFrame, asof: pd.Timestamp | None = None):
+    return compute_inflation_signals(df, asof=asof)["label"]
 
 
 # ==========================================================
@@ -1171,9 +951,542 @@ def render_regime_matrix(
 
 
 
+def render_score_breakdown(df: pd.DataFrame, latest_date: pd.Timestamp):
+    """اسکورکارت رشد/تورم برای این ماه و ماه قبل، کنار هم — تا معلوم بشه
+    نتیجه‌ی نهایی (↑/↓) یه اجماع قویه یا یه رأی شکننده و نزدیک‌به‌مساوی."""
+
+    asof_prev = latest_date - pd.DateOffset(months=1)
+
+    growth_now = compute_growth_signals(df, asof=latest_date)
+    growth_prev = compute_growth_signals(df, asof=asof_prev)
+
+    inflation_now = compute_inflation_signals(df, asof=latest_date)
+    inflation_prev = compute_inflation_signals(df, asof=asof_prev)
+
+    def _fmt(val, sign):
+        if pd.isna(val) or sign == 0:
+            return "—"
+        arrow = "▲" if sign > 0 else "▼"
+        color = "#4caf50" if sign > 0 else "#d9534f"
+        return f"<span style='color:{color};font-weight:700;'>{arrow} {val:+.2f}</span>"
+
+    def _build_table(now, prev, labels):
+        all_keys = list(dict.fromkeys(list(now["signals"].keys()) + list(prev["signals"].keys())))
+        rows = ""
+
+        for key in all_keys:
+            label = labels.get(key, key)
+            now_val, now_sign = now["signals"].get(key, (np.nan, 0))
+            prev_val, prev_sign = prev["signals"].get(key, (np.nan, 0))
+
+            flipped = now_sign != 0 and prev_sign != 0 and now_sign != prev_sign
+            flip_marker = " 🔄" if flipped else ""
+
+            rows += (
+                "<tr>"
+                f"<td style='padding:6px 10px;border:1px solid rgba(255,255,255,0.09);'>{label}{flip_marker}</td>"
+                f"<td style='padding:6px 10px;border:1px solid rgba(255,255,255,0.09);text-align:center;'>{_fmt(now_val, now_sign)}</td>"
+                f"<td style='padding:6px 10px;border:1px solid rgba(255,255,255,0.09);text-align:center;'>{_fmt(prev_val, prev_sign)}</td>"
+                "</tr>"
+            )
+
+        score_row = (
+            "<tr style='font-weight:800;background:rgba(255,255,255,0.04);'>"
+            "<td style='padding:6px 10px;border:1px solid rgba(255,255,255,0.09);'>مجموع امتیاز</td>"
+            f"<td style='padding:6px 10px;border:1px solid rgba(255,255,255,0.09);text-align:center;'>{now['score']:+d} → {now['label']}</td>"
+            f"<td style='padding:6px 10px;border:1px solid rgba(255,255,255,0.09);text-align:center;'>{prev['score']:+d} → {prev['label']}</td>"
+            "</tr>"
+        )
+
+        return (
+            "<table style='width:100%;border-collapse:collapse;font-size:12px;'>"
+            "<tr style='background:rgba(255,255,255,0.06);font-weight:800;'>"
+            "<td style='padding:6px 10px;border:1px solid rgba(255,255,255,0.09);'>سیگنال</td>"
+            "<td style='padding:6px 10px;border:1px solid rgba(255,255,255,0.09);text-align:center;'>این ماه</td>"
+            "<td style='padding:6px 10px;border:1px solid rgba(255,255,255,0.09);text-align:center;'>ماه قبل</td>"
+            "</tr>" + rows + score_row + "</table>"
+        )
+
+    with st.expander("🔍 جزئیات امتیازدهی Growth / Inflation (این ماه در برابر ماه قبل)"):
+        st.caption(
+            "هر سیگنال یا +۱ یا −۱ می‌ده؛ مجموع امتیازها رژیم رو تعیین می‌کنه. 🔄 یعنی جهت اون "
+            "سیگنال نسبت به ماه قبل عوض شده. اگه مجموع نزدیک صفر باشه (مثلاً +۱ از ۴ سیگنال)، "
+            "نتیجه شکننده‌ست و با یه سیگنال دیگه ممکنه برعکس بشه."
+        )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Growth Signals**")
+            st.markdown(_build_table(growth_now, growth_prev, GROWTH_SIGNAL_LABELS), unsafe_allow_html=True)
+        with col2:
+            st.markdown("**Inflation Signals**")
+            st.markdown(_build_table(inflation_now, inflation_prev, INFLATION_SIGNAL_LABELS), unsafe_allow_html=True)
+
+
+# ==========================================================
+# SEASONALITY — میانگین بازدهی هر ماه تقویمی
+# ==========================================================
+# برای هر دارایی: بازدهی ماهانه (پایان‌ماه به پایان‌ماه) طی `years`
+# سال اخیر رو حساب می‌کنیم، بعد بازدهی‌ها رو بر اساس شماره‌ی ماه
+# تقویمی (۱=ژانویه ... ۱۲=دسامبر) گروه‌بندی و میانگین می‌گیریم.
+# ماه جاری با آبی مشخص می‌شه (صرف‌نظر از مثبت/منفی بودنش)؛ بقیه‌ی
+# ماه‌ها سبز (میانگین مثبت) یا قرمز (میانگین منفی).
+
+SEASONALITY_ASSETS = [
+    ("SP500", "S&P 500"),
+    ("GOLD", "Gold"),
+    ("EURUSD", "EUR/USD"),
+]
+
+MONTH_LABELS_EN = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+]
+
+
+def _monthly_seasonality(df: pd.DataFrame, column: str, years: int = 15) -> pd.Series:
+    """میانگین بازدهی هر ماه تقویمی (۱ تا ۱۲) طی `years` سال اخیر.
+    خروجی یه Series با ایندکس ۱..۱۲ هست (مقدار NaN یعنی داده‌ی کافی
+    برای اون ماه نبوده)."""
+
+    if column not in df.columns:
+        return pd.Series(dtype=float)
+
+    temp = df[["Date", column]].dropna(subset=[column]).copy()
+    if temp.empty:
+        return pd.Series(dtype=float)
+
+    temp["Date"] = pd.to_datetime(temp["Date"], errors="coerce")
+    temp = temp.dropna(subset=["Date"]).sort_values("Date")
+    if temp.empty:
+        return pd.Series(dtype=float)
+
+    latest_date = temp["Date"].max()
+    cutoff = latest_date - pd.DateOffset(years=years)
+    temp = temp[temp["Date"] >= cutoff]
+    if temp.empty:
+        return pd.Series(dtype=float)
+
+    monthly_close = (
+        temp.set_index("Date")[column]
+        .resample("ME")
+        .last()
+        .dropna()
+    )
+
+    monthly_returns = monthly_close.pct_change().dropna() * 100
+    if monthly_returns.empty:
+        return pd.Series(dtype=float)
+
+    seasonality = monthly_returns.groupby(monthly_returns.index.month).mean()
+
+    return seasonality.reindex(range(1, 13))
+
+
+def render_seasonality_chart(df: pd.DataFrame, column: str, label: str, years: int = 15):
+    """بار-چارت seasonality رو برای یه دارایی رسم می‌کنه — یه چارت
+    جدا برای هر دارایی، دقیقاً مثل الگوی این تصویر: عنوان + محور X
+    = ماه‌ها + میله‌ی سبز/قرمز + ماه جاری آبی."""
+
+    seasonality = _monthly_seasonality(df, column, years=years)
+
+    if seasonality.empty or seasonality.isna().all():
+        st.info(f"داده‌ی کافی برای seasonality «{label}» نیست.")
+        return
+
+    current_month = pd.Timestamp.now().month
+
+    colors = []
+    for month in range(1, 13):
+        value = seasonality.get(month, np.nan)
+        if month == current_month:
+            colors.append("#5B8DEF")
+        elif pd.isna(value):
+            colors.append("rgba(255,255,255,0.12)")
+        elif value >= 0:
+            colors.append("#3fb968")
+        else:
+            colors.append("#d9534f")
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Bar(
+            x=MONTH_LABELS_EN,
+            y=seasonality.values,
+            marker_color=colors,
+            hovertemplate="%{x}: %{y:.2f}%<extra></extra>",
+        )
+    )
+
+    fig.update_layout(
+        template="plotly_dark",
+        title=f"{label} · Average Calendar-Month Return (~{years}y) · current month in blue",
+        height=340,
+        hovermode="x",
+        yaxis_title="%",
+        margin=dict(l=20, r=20, t=50, b=20),
+        showlegend=False,
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# ==========================================================
+# STOCK-BOND ROLLING CORRELATION
+# ==========================================================
+# همبستگی غلتان بین بازدهی روزانه‌ی سهام (SP500) و اوراق (TLT) —
+# روی دو پنجره‌ی ۳۰ و ۹۰ روزه، دقیقاً مثل عکس مرجع. زیر صفر یعنی
+# رفتار سنتی hedge (سهام و اوراق خلاف جهت هم)، بالای صفر یعنی
+# هم‌جهت شدن (که خودش یه سیگنال رژیمیه — معمولاً با تورم بالا مرتبطه).
+
+def _rolling_stock_bond_correlation(
+    df: pd.DataFrame,
+    stock_col: str = "SP500",
+    bond_col: str = "TLT",
+    windows: tuple = (30, 90),
+) -> pd.DataFrame:
+
+    if stock_col not in df.columns or bond_col not in df.columns:
+        return pd.DataFrame()
+
+    temp = df[["Date", stock_col, bond_col]].dropna().copy()
+    if temp.empty:
+        return pd.DataFrame()
+
+    temp["Date"] = pd.to_datetime(temp["Date"], errors="coerce")
+    temp = temp.dropna(subset=["Date"]).sort_values("Date")
+    temp = temp.drop_duplicates(subset="Date")
+
+    if temp.empty:
+        return pd.DataFrame()
+
+    stock_ret = temp[stock_col].pct_change()
+    bond_ret = temp[bond_col].pct_change()
+
+    result = pd.DataFrame({"Date": temp["Date"].values})
+
+    corr_columns = []
+    for w in windows:
+        col_name = f"corr_{w}d"
+        result[col_name] = stock_ret.rolling(w).corr(bond_ret).values
+        corr_columns.append(col_name)
+
+    result = result.dropna(how="all", subset=corr_columns)
+
+    return result
+
+
+def render_stock_bond_correlation_chart(
+    df: pd.DataFrame,
+    stock_col: str = "SP500",
+    bond_col: str = "TLT",
+    stock_label: str = "SP500",
+    bond_label: str = "TLT",
+):
+
+    corr_df = _rolling_stock_bond_correlation(df, stock_col, bond_col, windows=(30, 90))
+
+    if corr_df.empty:
+        st.info(f"داده‌ی کافی برای همبستگی {stock_label}/{bond_label} نیست.")
+        return
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=corr_df["Date"],
+            y=corr_df["corr_30d"],
+            mode="lines",
+            name="30d corr",
+            line=dict(width=1.3, color="#e8983f"),
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=corr_df["Date"],
+            y=corr_df["corr_90d"],
+            mode="lines",
+            name="90d corr",
+            line=dict(width=2.2, color="#a78bfa"),
+        )
+    )
+
+    fig.add_hline(
+        y=0,
+        line=dict(color="rgba(255,255,255,0.4)", dash="dash", width=1),
+    )
+
+    fig.update_layout(
+        template="plotly_dark",
+        title=f"Stock-Bond Correlation ({stock_label}/{bond_label}) · 30d and 90d (daily returns)",
+        height=420,
+        hovermode="x unified",
+        yaxis=dict(title="Correlation", range=[-1, 1]),
+        margin=dict(l=20, r=20, t=50, b=20),
+        legend=dict(orientation="h", yanchor="top", y=-0.16, xanchor="center", x=0.5),
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# ==========================================================
+# CONDITIONAL PLAYBOOK — Next-N-Session Outcomes by Regime State
+# ==========================================================
+
+FORWARD_HORIZON = 21  # جلسه‌ی معاملاتی
+
+CURVE_STATE_ORDER = [
+    "BullSteepener", "BearSteepener",
+    "BullFlattener", "BearFlattener",
+    "SteepenerTwist", "FlattenerTwist",
+]
+
+CURVE_STATE_LABELS = {
+    "BullSteepener": "Bull Steepener",
+    "BearSteepener": "Bear Steepener",
+    "BullFlattener": "Bull Flattener",
+    "BearFlattener": "Bear Flattener",
+    "SteepenerTwist": "Steepener Twist",
+    "FlattenerTwist": "Flattener Twist",
+}
+
+
+STOCK_BOND_CORR_WINDOW = 30
+
+
+def _derive_curve_state_series(df: pd.DataFrame) -> pd.Series:
+    """همیشه از ستون‌های flag (که خودمون توی updater.py/bond_plot.py می‌شناسیم
+    و مطمئنیم پر می‌شن) مشتق می‌کنیم — نه از ستون CurveRegime که فرمت دقیقش
+    برامون ناشناخته‌ست و ممکنه خالی یا فرمتش متفاوت باشه."""
+
+    if "2s10s" not in df.columns:
+        return pd.Series(np.nan, index=df.index, dtype=object)
+
+    state = pd.Series(np.nan, index=df.index, dtype=object)
+    for flag_col in CURVE_STATE_ORDER:
+        if flag_col in df.columns:
+            match = df[flag_col] == df["2s10s"]
+            state[match] = flag_col
+
+    return state.ffill()
+
+
+def _stock_bond_corr_state_series(df: pd.DataFrame, stock_col="SP500", bond_col="TLT", window=STOCK_BOND_CORR_WINDOW) -> pd.Series:
+
+    state = pd.Series(np.nan, index=df.index, dtype=object)
+
+    if stock_col not in df.columns or bond_col not in df.columns:
+        return state
+
+    stock_ret = pd.to_numeric(df[stock_col], errors="coerce").pct_change()
+    bond_ret = pd.to_numeric(df[bond_col], errors="coerce").pct_change()
+    corr = stock_ret.rolling(window).corr(bond_ret)
+
+    state[corr > 0] = "POSITIVE"
+    state[corr <= 0] = "NEGATIVE"
+
+    return state
+
+
+def _dimension_diagnostics(df: pd.DataFrame) -> list[str]:
+    """اگه بعضی بُعدها هیچ داده‌ای ندن، دلیل محتمل رو برمی‌گردونه — تا به‌جای
+    حذف بی‌صدا، بدونیم دقیقاً کدوم ستون مشکل داره."""
+
+    notes = []
+
+    if "2s10s" not in df.columns or not any(c in df.columns for c in CURVE_STATE_ORDER):
+        notes.append("Curve regime: ستون‌های 2s10s/BullSteepener و مشابهشون توی دیتابیس نیستن.")
+
+    if "TLT" not in df.columns:
+        notes.append("Stock-bond corr: ستون TLT توی دیتابیس نیست.")
+    elif df["TLT"].notna().sum() < STOCK_BOND_CORR_WINDOW:
+        notes.append(f"Stock-bond corr: ستون TLT کمتر از {STOCK_BOND_CORR_WINDOW} مقدار معتبر داره.")
+
+    if "NFCI" not in df.columns:
+        notes.append("Financial conditions: ستون NFCI توی دیتابیس نیست.")
+
+    return notes
+
+
+def _stock_bond_corr_state_series(df: pd.DataFrame, stock_col="SP500", bond_col="TLT", window=90) -> pd.Series:
+    """علامت همبستگی غلتان بین بازدهی روزانه‌ی سهام و اوراق — یه سری روزانه
+    هم‌تراز با کل دیتابیس (نه فقط ردیف‌های بدون‌گپ)."""
+
+    state = pd.Series(np.nan, index=df.index, dtype=object)
+
+    if stock_col not in df.columns or bond_col not in df.columns:
+        return state
+
+    stock_ret = pd.to_numeric(df[stock_col], errors="coerce").pct_change()
+    bond_ret = pd.to_numeric(df[bond_col], errors="coerce").pct_change()
+    corr = stock_ret.rolling(window).corr(bond_ret)
+
+    state[corr > 0] = "POSITIVE"
+    state[corr <= 0] = "NEGATIVE"
+
+    return state
+
+
+def _nfci_state_series(df: pd.DataFrame) -> pd.Series:
+    """علامت NFCI شیکاگو فد — منفی یعنی شرایط مالی «شل‌تر از میانگین
+    تاریخی»، مثبت/صفر یعنی «سفت‌تر». چون NFCI هفتگیه، بین دو انتشار
+    forward-fill می‌شه."""
+
+    state = pd.Series(np.nan, index=df.index, dtype=object)
+
+    if "NFCI" not in df.columns:
+        return state
+
+    nfci = pd.to_numeric(df["NFCI"], errors="coerce").ffill()
+    state[nfci < 0] = "LOOSE"
+    state[nfci >= 0] = "TIGHT"
+
+    return state
+
+
+def _forward_pct_return(series: pd.Series, horizon: int = FORWARD_HORIZON) -> pd.Series:
+    series = pd.to_numeric(series, errors="coerce")
+    future = series.shift(-horizon)
+    return (future / series - 1) * 100
+
+
+def _forward_bps_change(series: pd.Series, horizon: int = FORWARD_HORIZON) -> pd.Series:
+    series = pd.to_numeric(series, errors="coerce")
+    future = series.shift(-horizon)
+    return (future - series) * 100
+
+
+def _build_dimension_rows(dimension_label, state_series, state_order, state_labels, spx_fwd, gold_fwd, y10_fwd_bps):
+
+    rows = []
+    current_valid = state_series.dropna()
+    current_state = current_valid.iloc[-1] if not current_valid.empty else None
+
+    for state in state_order:
+        mask = state_series == state
+        n = int(mask.sum())
+        if n == 0:
+            continue
+
+        spx_vals = spx_fwd[mask].dropna()
+        gold_vals = gold_fwd[mask].dropna()
+        y10_vals = y10_fwd_bps[mask].dropna()
+
+        rows.append({
+            "dimension": dimension_label,
+            "state_label": state_labels.get(state, state),
+            "obs": n,
+            "spx_avg": spx_vals.mean() if not spx_vals.empty else np.nan,
+            "spx_pos": (spx_vals > 0).mean() * 100 if not spx_vals.empty else np.nan,
+            "gold_avg": gold_vals.mean() if not gold_vals.empty else np.nan,
+            "y10_avg_bps": y10_vals.mean() if not y10_vals.empty else np.nan,
+            "is_current": state == current_state,
+        })
+
+    return rows
+
+
+def render_conditional_playbook_table(df: pd.DataFrame, horizon: int = FORWARD_HORIZON):
+
+    if "SP500" not in df.columns:
+        st.info("ستون SP500 برای این جدول لازمه و پیدا نشد.")
+        return
+
+    work = df.sort_values("Date").reset_index(drop=True)
+
+    spx_fwd = _forward_pct_return(work["SP500"], horizon)
+    gold_fwd = _forward_pct_return(work["GOLD"], horizon) if "GOLD" in work.columns else pd.Series(np.nan, index=work.index)
+    y10_fwd_bps = _forward_bps_change(work["10Y"], horizon) if "10Y" in work.columns else pd.Series(np.nan, index=work.index)
+
+    curve_state = _derive_curve_state_series(work)
+    corr_state = _stock_bond_corr_state_series(work, window=STOCK_BOND_CORR_WINDOW)
+    nfci_state = _nfci_state_series(work)
+
+    rows = []
+    rows += _build_dimension_rows("Curve regime", curve_state, CURVE_STATE_ORDER, CURVE_STATE_LABELS, spx_fwd, gold_fwd, y10_fwd_bps)
+    rows += _build_dimension_rows(
+        "Stock-bond corr", corr_state, ["NEGATIVE", "POSITIVE"],
+        {"NEGATIVE": "NEGATIVE (hedge on)", "POSITIVE": "POSITIVE (no hedge)"},
+        spx_fwd, gold_fwd, y10_fwd_bps,
+    )
+    rows += _build_dimension_rows(
+        "Financial conditions (NFCI)", nfci_state, ["LOOSE", "TIGHT"],
+        {"LOOSE": "LOOSE (<0)", "TIGHT": "TIGHT (≥0)"},
+        spx_fwd, gold_fwd, y10_fwd_bps,
+    )
+
+    diagnostics = _dimension_diagnostics(work)
+    if diagnostics and len(rows) < 10:
+        st.caption("⚠️ " + " | ".join(diagnostics))
+
+    if not rows:
+        st.info("داده‌ی کافی برای این جدول نیست.")
+        return
+
+    valid_dates = work["Date"].dropna()
+    years_span = (valid_dates.max() - valid_dates.min()).days / 365.25 if len(valid_dates) > 1 else 0
+
+    def _fmt_pct(v): return "—" if pd.isna(v) else f"{v:+.2f}%"
+    def _fmt_pos(v): return "—" if pd.isna(v) else f"{v:.0f}%"
+    def _fmt_bps(v): return "—" if pd.isna(v) else f"{v:+.0f}bp"
+
+    header_cells = ["dimension", "state", "obs", f"SPX +{horizon}d avg", "SPX %pos", f"Gold +{horizon}d avg", f"10Y +{horizon}d avg"]
+    header_html = "".join(
+        f"<th style='padding:8px 12px;border:1px solid rgba(255,255,255,0.09);"
+        f"background:rgba(255,255,255,0.05);color:#e8e8e8;text-align:left;font-family:Consolas,monospace;font-size:12px;'>{h}</th>"
+        for h in header_cells
+    )
+
+    rows_html = ""
+    for row in rows:
+        highlight = row["is_current"]
+        bg = "rgba(46,196,182,0.14)" if highlight else "transparent"
+        state_text = row["state_label"] + (" ◄ NOW" if highlight else "")
+
+        def _cell(value, align="left", color="#d8d8d8"):
+            return (
+                f"<td style='padding:7px 12px;border:1px solid rgba(255,255,255,0.09);"
+                f"background:{bg};color:{color};text-align:{align};font-family:Consolas,monospace;font-size:12px;'>{value}</td>"
+            )
+
+        spx_color = "#3fb968" if pd.notna(row["spx_avg"]) and row["spx_avg"] >= 0 else "#d9534f"
+        gold_color = "#3fb968" if pd.notna(row["gold_avg"]) and row["gold_avg"] >= 0 else "#d9534f"
+        y10_color = "#3fb968" if pd.notna(row["y10_avg_bps"]) and row["y10_avg_bps"] >= 0 else "#d9534f"
+
+        rows_html += (
+            "<tr>"
+            + _cell(row["dimension"])
+            + _cell(state_text, color="#2ec4b6" if highlight else "#d8d8d8")
+            + _cell(row["obs"], align="right")
+            + _cell(_fmt_pct(row["spx_avg"]), align="right", color=spx_color)
+            + _cell(_fmt_pos(row["spx_pos"]), align="right")
+            + _cell(_fmt_pct(row["gold_avg"]), align="right", color=gold_color)
+            + _cell(_fmt_bps(row["y10_avg_bps"]), align="right", color=y10_color)
+            + "</tr>"
+        )
+
+    table_html = f"""
+    <div style="border:1px solid rgba(255,255,255,0.09);border-radius:10px;padding:14px 16px;background:rgba(255,255,255,0.02);">
+        <div style="font-weight:800;font-size:14px;color:#f0f0f0;margin-bottom:10px;">
+            CONDITIONAL PLAYBOOK · NEXT-{horizon}-SESSION OUTCOMES BY REGIME STATE (≈{years_span:.1f}y sample)
+        </div>
+        <table style="width:100%;border-collapse:collapse;">
+            <tr>{header_html}</tr>
+            {rows_html}
+        </table>
+        <div style="margin-top:8px;font-size:11px;color:#8f949e;">
+            overlapping daily observations · highlighted rows = today's active states · history, not prophecy: regimes describe the playing field, not the play
+        </div>
+    </div>
+    """
+
+    st.markdown(table_html, unsafe_allow_html=True)
+
+
 # ==========================================================
 # MACRO × BOND REGIME — COLLAPSIBLE RESEARCH NOTES
-# Put this AFTER render_regime_matrix(...)
 # ==========================================================
 
 def render_research_notes():
@@ -3484,7 +3797,7 @@ def show():
             # ------------------------------------------------
 
             st.subheader(
-                "📊 Macro × Bond Regime Matrix"
+                "💵 Macro × Bond Regime Matrix"
             )
             st.caption(
                 "Growth = momentum of leading/current activity; "
@@ -3551,12 +3864,18 @@ def show():
                     "Bear Steepening"
                 ]
             ):
+                st.write("")
+
+                render_score_breakdown(df, df["Date"].max())
+
+                st.write("")
 
                 render_regime_matrix( growth_regime, inflation_regime, curve_regime )
                 # ------------------------------------------------
                 # RESEARCH NOTES
                 # ------------------------------------------------
                 render_research_notes()
+
 
             else:
 
@@ -3573,6 +3892,43 @@ def show():
                 f"Regime Matrix Error: {e}"
             )
 
+
+    # ======================================================
+    # SEASONALITY
+    # ======================================================
+
+    if not df.empty:
+
+        st.divider()
+
+        st.subheader(
+            "📅 Seasonality — میانگین بازدهی ماهانه (۱۵ سال اخیر)"
+        )
+
+        st.caption(
+            "برای هر ماه تقویمی، میانگین بازدهی همون ماه طی ۱۵ سال "
+            "اخیر محاسبه شده. ماه جاری با رنگ آبی مشخصه."
+        )
+
+        for column, label in SEASONALITY_ASSETS:
+            render_seasonality_chart(df, column, label, years=15)
+
+        st.divider()
+
+        st.subheader("🔗 Stock-Bond Correlation")
+
+        st.caption(
+            "همبستگی غلتان بین بازدهی روزانه‌ی S&P 500 و TLT (اوراق ۲۰+ ساله)، "
+            "روی دو پنجره‌ی ۳۰ و ۹۰ روزه. زیر صفر یعنی رفتار سنتی hedge "
+            "(سهام و اوراق خلاف جهت هم)؛ بالای صفر یعنی هم‌جهت شدن‌شون."
+        )
+
+        render_stock_bond_correlation_chart(df)
+
+    if not df.empty:
+        st.divider()
+        st.subheader("📋 Conditional Playbook")
+        render_conditional_playbook_table(df)
 
     # ======================================================
     # UPDATE DATABASE
