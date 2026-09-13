@@ -1,16 +1,14 @@
 """
-استایل مشترک کل پروژه — فونت + رنگ لهجه (accent) + استایل پایه‌ی دکمه‌ها.
+Global theme for Macro × Bond Regime Framework.
 
-چون Streamlit چندصفحه‌ای هر فایل را مستقل اجرا می‌کند،
-تزریق CSS توی یک صفحه به بقیه سرایت نمی‌کند.
-
-برای همین این تابع باید همان اول هر تابع show()
-(توی هر صفحه‌ای که هست) صدا زده بشه:
-
-    from theme import inject_global_style
-    inject_global_style()
-
-استایل‌های اختصاصی هر صفحه همچنان در همان فایل می‌مانند.
+این فایل استایل مشترک کل پروژه را مدیریت می‌کند:
+- فونت
+- RTL / bidirectional text
+- رنگ Accent
+- دکمه‌ها
+- Sidebar
+- Sidebar footer
+- حذف Navigation پیش‌فرض Streamlit
 """
 
 import streamlit as st
@@ -23,6 +21,10 @@ import streamlit as st
 ACCENT = "#c9a24b"
 ACCENT_SOFT = "rgba(201,162,75,0.45)"
 
+
+# ==========================================================
+# GLOBAL STYLE
+# ==========================================================
 
 def inject_global_style() -> None:
     st.markdown(
@@ -37,12 +39,6 @@ def inject_global_style() -> None:
             'https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700;800&display=swap'
         );
 
-        /*
-        پایه: از طریق ارث‌بری معمولی CSS روی همه‌چیز اعمال می‌شود.
-        عمداً روی span/div عمومی !important نگذاشته‌ایم تا فونت
-        آیکون‌های Streamlit مثل Material Symbols خراب نشود.
-        */
-
         html,
         body,
         .stApp,
@@ -51,7 +47,8 @@ def inject_global_style() -> None:
         }}
 
         /*
-        !important فقط روی عناصر متنی مشخص.
+        فقط عناصر متنی مشخص را با !important کنترل می‌کنیم
+        تا Material Symbols و آیکون‌های Streamlit خراب نشوند.
         */
 
         h1,
@@ -112,54 +109,17 @@ def inject_global_style() -> None:
 
 
         /* ==========================================================
-           SIDEBAR NAV
-           یکپارچه‌سازی ظاهر دو نوع ناوبری
+           SIDEBAR
            ========================================================== */
 
-
-        /* ----------------------------------------------------------
-           ناوبری بومی چندصفحه‌ای
-           app / iran market / world market
-           ---------------------------------------------------------- */
-
-        [data-testid="stSidebarNavItems"] > li > div > a {{
-            border-radius: 8px;
-            padding: 6px 10px !important;
-            transition:
-                background-color 0.15s ease,
-                color 0.15s ease;
+        [data-testid="stSidebar"] {{
+            position: relative;
+            padding-bottom: 76px;
         }}
 
-        [data-testid="stSidebarNavItems"] > li > div > a span {{
-            font-size: 14px;
-            color: #b8bcc4;
-        }}
-
-        [data-testid="stSidebarNavItems"] > li > div > a:hover {{
-            background-color: rgba(255,255,255,0.05);
-        }}
-
-        [data-testid="stSidebarNavItems"]
-        > li
-        > div
-        > a[aria-current="page"] {{
-            background-color: {ACCENT}22;
-        }}
-
-        [data-testid="stSidebarNavItems"]
-        > li
-        > div
-        > a[aria-current="page"]
-        span {{
-            color: {ACCENT};
-            font-weight: 700;
-        }}
-
-
-        /* ----------------------------------------------------------
-           منوی رادیویی دستی
-           Dashboard / Charts / Correlation / ...
-           ---------------------------------------------------------- */
+        /* ==========================================================
+           CUSTOM SIDEBAR RADIO NAVIGATION
+           ========================================================== */
 
         [data-testid="stSidebar"]
         [data-testid="stRadio"]
@@ -173,7 +133,9 @@ def inject_global_style() -> None:
             border-radius: 8px;
             padding: 6px 10px;
             width: 100%;
-            transition: background-color 0.15s ease;
+            transition:
+                background-color 0.15s ease,
+                color 0.15s ease;
         }}
 
         [data-testid="stSidebar"]
@@ -183,8 +145,7 @@ def inject_global_style() -> None:
         }}
 
         /*
-        دایره‌ی رادیو حذف می‌شود.
-        فقط پس‌زمینه‌ی گزینه‌ی فعال نمایش داده می‌شود.
+        حذف دایره‌ی Radio
         */
 
         [data-testid="stSidebar"]
@@ -192,6 +153,10 @@ def inject_global_style() -> None:
         label > div:first-child {{
             display: none;
         }}
+
+        /*
+        گزینه‌ی فعال
+        */
 
         [data-testid="stSidebar"]
         [data-testid="stRadio"]
@@ -217,27 +182,34 @@ def inject_global_style() -> None:
 
         /* ==========================================================
            SIDEBAR FOOTER
-           نام ثابت پایین سایدبار
            ========================================================== */
 
-        [data-testid="stSidebar"] {{
-            position: relative;
-            padding-bottom: 46px;
-        }}
-
         [data-testid="stSidebar"]::after {{
-            content: "Seyed Mohammad Saeid Mousavi";
+            content:
+                "Macro Analysis App\\A"
+                "Framework · v0.8\\A"
+                "Seyed Mohammad Saeid Mousavi";
+
             position: absolute;
             bottom: 0;
             left: 0;
             right: 0;
 
-            padding: 12px 16px;
+            padding: 12px 16px 14px 16px;
 
             text-align: center;
 
-            font-size: 12px;
-            letter-spacing: 0.3px;
+            white-space: pre-line;
+
+            font-family:
+                'Vazirmatn',
+                Arial,
+                sans-serif;
+
+            font-size: 11px;
+            line-height: 1.7;
+
+            letter-spacing: 0.2px;
 
             color: #6b7280;
 
@@ -246,6 +218,16 @@ def inject_global_style() -> None:
 
             background: inherit;
         }}
+
+
+        /* ==========================================================
+           SIDEBAR FOOTER TITLE
+           ========================================================== */
+
+        /*
+        این بخش عمداً خیلی subtle نگه داشته شده تا
+        Footer با Navigation رقابت نکند.
+        */
 
 
         /* ==========================================================
