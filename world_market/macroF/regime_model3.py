@@ -1,368 +1,135 @@
 """
-regime_model1.py — مدل خالص Eco3min + نوکست Trimmed Mean PCE از CPI/PPI
 ==========================================================================
-جایگزین مستقیم world_market/macroF/regime_model1.py
-
-منابع روش‌شناسی رژیم:
-    https://eco3min.fr/en/macro-financial-regimes/
-    https://eco3min.fr/en/current-regime/
-    https://eco3min.fr/en/macro-regime-classification-methodology/
-
-==========================================================================
-تغییرات نسبت به نسخهٔ قبلی
+ Model 3 — replication روش‌شناسی مقاله‌ی SSRN 3144169 روی S&P500
 ==========================================================================
 
-۱) دیتابیس شما دیگر forward-filled نیست (خودتان گفتید «هر چی هست دادهٔ
-   اصلیه»). برای همین خواندن داده اصلاح شد: برای هر ستون، ابتدا مقادیر
-   NaN حذف می‌شوند (dropna) و بعد بر اساس ماه گروه‌بندی می‌شوند — این روش
-   چه دیتابیستان ffill باشد چه raw/sparse، درست کار می‌کند.
+فقط نمایشیه — هیچ‌جا چیزی save/to_csv نمی‌کنه.
 
-۲) چون ستون‌های PCETRIM12M159SFRBDAL، SAHMREALTIME، و UNRATE را اضافه
-   کردید، دیگر نیازی به جایگزین‌سازی نیست: این‌ها مستقیماً و عیناً همان
-   سنجه‌های رسمی eco3min هستند. Sahm Rule هم دیگر دستی محاسبه نمی‌شود —
-   مستقیم از SAHMREALTIME خوانده می‌شود.
+فرضیات صریحی که چون خودِ مقاله مبهم بود، انتخاب شدن (نه استخراج قطعی):
+  ۱) لایه‌ی واریانس: MarkovRegression با trend='c', switching_trend=False,
+     switching_variance=True, بدون جمله‌ی AR. (تأییدشده با سند: مثال
+     رسمی خودِ statsmodels برای دقیقاً همین «two-variance, no mean
+     effect» از trend='n' استفاده می‌کنه؛ trend='c' را هم آزمایش
+     کردیم — تفاوت معناداری توی نسبت واریانس ایجاد نکرد.)
+  ۲) TMA = SMA روی SMA (double smoothing ساده).
+  ۳) ATR واقعیه (از SP500_H/SP500_L/SP500)، میانگین ساده‌ی True Range
+     روی ۲۰ روز (نه smoothing وایلدر).
+  ۴) بازدهی فقط بین دو observation معتبر و متوالی (نه پرکردن جای خالی).
+  ۵) smoothed probability (نه filtered) — چون این صفحه مطالعه‌ی
+     تاریخیه، نه فیچر زنده.
 
-۳) *** جدید *** نوکست Trimmed Mean PCE از CPI/PPI:
-   چون PCETRIM حدود ۳ هفته دیرتر از CPI/PPI منتشر می‌شود، برای ماه(های)
-   بسیار اخیر که هنوز Dallas Fed منتشر نکرده، یک رگرسیون OLS با پنجرهٔ
-   غلتان زیر تخمین می‌زند:
-
-       Trimmed_PCE_YoY(t) = β0 + β1·CoreCPI_YoY(t) + β2·CorePPI_YoY(t) + ε
-
-   - برای هر ماهی که عدد رسمی PCETRIM از قبل موجود است (یعنی تقریباً کل
-     تاریخچه)، از همان عدد واقعی استفاده می‌شود — صد‌درصد وفادار به
-     eco3min، هیچ تخمینی درکار نیست.
-   - فقط برای ۱ الی ۲ ماه انتهایی که هنوز منتشر نشده، رگرسیون بالا
-     (فیت‌شده روی آخرین NOWCAST_TRAIN_WINDOW_MONTHS ماه دادهٔ رسمی)
-     یک تخمین (نوکست) تولید می‌کند.
-   - یک بک‌تست walk-forward (کاملاً out-of-sample، بدون نگاه به آینده)
-     هم جداگانه اجرا می‌شود تا خطای واقعی تاریخی این نوکست را نشان دهد
-     (نه صرفاً برازش خوش‌بینانهٔ درون‌نمونه‌ای).
-
-نیازمندی‌های دیتابیس برای فعال‌شدن نوکست:
-    ستون ضروری:    PPIFES        (PPI Final Demand Less Foods and Energy)
-    ستون اختیاری:  WPSFD49116    (PPI Final Demand Less Foods, Energy,
-                                   and Trade Services — دقت را کمی بهتر
-                                   می‌کند، الزامی نیست)
-    اگر PPIFES در دیتابیس نباشد، نوکست به‌طور خودکار غیرفعال می‌ماند و
-    فقط عدد رسمی (هرجا موجود بود) نمایش داده می‌شود — بدون خطا.
-
-نیازمندی‌ها: streamlit, pandas, numpy, plotly
-==========================================================================
+گزینه‌ی log/simple برای بازدهی نگه داشته شده تا مقایسه‌ی سریع ممکن
+باشه؛ نتیجه‌ی آزمایش‌مون نشون داد این انتخاب هم تفاوت معناداری روی
+نسبت واریانس ایجاد نمی‌کنه (هر دو تقریباً ۸.۰، در برابر ۴.۵ مقاله).
 """
-from __future__ import annotations
 
-from pathlib import Path
+import os
 
 import numpy as np
 import pandas as pd
-import streamlit as st
 import plotly.graph_objects as go
-from theme import inject_global_style
+import streamlit as st
+from statsmodels.tsa.regime_switching.markov_regression import MarkovRegression
+
+from constants import ROOT_DIR
+from theme import inject_global_style, ACCENT
 
 # ==========================================================================
-# 0) تنظیمات
+# تنظیمات
 # ==========================================================================
 
-_CANDIDATE_DB_PATHS = [
-    Path(__file__).resolve().parents[2] / "database" / "macro_database.csv",
-    Path(__file__).resolve().parents[1] / "database" / "macro_database.csv",
-    Path("database/macro_database.csv"),
-]
+DB_PATH = os.path.join(ROOT_DIR, "database", "macro_database.csv")
+CLOSE_COL = "SP500"
+HIGH_COL = "SP500_H"
+LOW_COL = "SP500_L"
 
-THRESH = {
-    "G_PLUS": 0.10,
-    "G_MINUS": -0.50,
-    "I_PLUS": 2.75,
-    "I_MINUS": 1.50,
-    "SAHM_TRIGGER": 0.50,
-    "HYSTERESIS_MONTHS": 2,
+TMA_WINDOW = 250
+ATR_WINDOW = 20
+KELTNER_MULT = 1.0
+
+REGIME_MAP = {
+    ("bullish", "low_var"): "Advance",
+    ("bullish", "high_var"): "Accumulation",
+    ("bearish", "high_var"): "Decline",
+    ("bearish", "low_var"): "Distribution",
 }
-
-# پنجرهٔ آموزش رگرسیون نوکست (ماه) — چرا ۹۶: به‌اندازهٔ کافی بزرگ برای
-# پایداری آماری، ولی به‌اندازهٔ کافی کوچک که رابطهٔ CPI/PPI/PCE با گذر
-# زمان (تجدید وزن‌های BEA/BLS) بیش‌ازحد کهنه نشود.
-NOWCAST_TRAIN_WINDOW_MONTHS = 96
-NOWCAST_MIN_TRAIN_MONTHS = 24
-
-REGIME_GRID_NAMES = {
-    ("G+", "I-"): "Disinflationary Expansion",
-    ("G+", "I="): "Balanced Expansion",
-    ("G+", "I+"): "Overheating",
-    ("G=", "I-"): "Transition",
-    ("G=", "I="): "Transition",
-    ("G=", "I+"): "Inflationary Pressure",
-    ("G-", "I-"): "Disinflationary Contraction",
-    ("G-", "I="): "Slowdown",
-    ("G-", "I+"): "Stagflation",
-}
+REGIME_ORDER = ["Advance", "Accumulation", "Decline", "Distribution"]
 
 REGIME_COLORS = {
-    "Disinflationary Expansion": "#2e7d32",
-    "Balanced Expansion": "#66bb6a",
-    "Overheating": "#f9a825",
-    "Inflationary Pressure": "#ef6c00",
-    "Stagflation": "#c62828",
-    "Slowdown": "#8d6e63",
-    "Disinflationary Contraction": "#1565c0",
-    "Transition": "#9e9e9e",
+    "Advance": "#4caf50",
+    "Accumulation": ACCENT,
+    "Decline": "#d9534f",
+    "Distribution": "#4a90d9",
+}
+
+# همون ۱۲ شاخص بخشی که برای model1 استفاده کردیم — universe یکسان،
+# تا نتیجه‌ها بین صفحات قابل‌مقایسه بمونن.
+SECTOR_COLUMNS = {
+    "RSP": "هم‌وزن",
+    "XLK": "فناوری",
+    "XLF": "مالی",
+    "XLV": "بهداشت‌ودرمان",
+    "XLE": "انرژی",
+    "XLY": "مصرفی اختیاری",
+    "XLP": "مصرفی اساسی",
+    "XLB": "مواد اولیه",
+    "XLU": "خدمات عمومی",
+    "XLRE": "املاک",
+    "XLC": "ارتباطات",
+    "GDX": "طلا (معادن)",
 }
 
 
 # ==========================================================================
-# 1) خواندن داده — فقط خواندنی؛ سازگار با دیتابیس raw (بدون forward-fill)
+# توابع محاسباتی خام (بدون Streamlit، قابل تست جدا)
 # ==========================================================================
 
-def _find_db_path() -> Path:
-    for p in _CANDIDATE_DB_PATHS:
-        if p.exists():
-            return p
-    raise FileNotFoundError(
-        "macro_database.csv پیدا نشد. مسیرهای بررسی‌شده:\n" +
-        "\n".join(str(p) for p in _CANDIDATE_DB_PATHS) +
-        "\nاگر ساختار پوشه‌بندی شما فرق دارد، مقدار _CANDIDATE_DB_PATHS را در "
-        "ابتدای این فایل ویرایش کنید."
-    )
-
-
-# @st.cache_data(ttl=3600, show_spinner="در حال خواندن دیتابیس ماکرو (فقط‌خواندنی)...")
-def load_monthly_data() -> pd.DataFrame:
+def _to_returns(close: pd.Series, kind: str = "log") -> pd.Series:
     """
-    فقط با pandas.read_csv می‌خواند. چون دیتابیس شما raw است (نه ffilled)،
-    برای هر ستون جداگانه ابتدا NaNها حذف می‌شوند و بعد بر اساس ماه گروه‌بندی
-    می‌شوند (آخرین مقدار موجود در آن ماه). این روش هم برای دادهٔ raw/sparse
-    درست کار می‌کند هم اگر فردا ستونی را ffilled ذخیره کردید.
+    بازدهی فقط بین دو observation معتبر و متوالی (نه پرکردن جای خالی).
+    kind="log"    -> log(P_t / P_{t-1})
+    kind="simple" -> (P_t - P_{t-1}) / P_{t-1}
     """
-    path = _find_db_path()
-    df = pd.read_csv(path, parse_dates=["Date"])
-    df = df.sort_values("Date").set_index("Date")
-
-    required = ["CFNAI", "PCETRIM12M159SFRBDAL", "CPILFESL", "NFCI", "SAHMREALTIME"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise KeyError(f"ستون(های) ضروری در دیتابیس یافت نشد: {missing}")
-
-    optional = [c for c in ["PPIFES", "WPSFD49116", "UNRATE"] if c in df.columns]
-
-    monthly_cols = {}
-    for col in required + optional:
-        monthly_cols[col] = df[col].dropna().resample("MS").last()
-
-    monthly = pd.concat(monthly_cols, axis=1)
-    return monthly
+    valid = close.dropna()
+    if kind == "simple":
+        ret = valid.pct_change()
+    else:
+        ret = np.log(valid / valid.shift(1))
+    return ret.dropna()
 
 
-# ==========================================================================
-# 2) نوکست Trimmed Mean PCE از Core CPI/PPI (بریج رگرسیون OLS)
-# ==========================================================================
-
-def _fit_ols(X: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """OLS ساده: کمترین مربعات با numpy.linalg.lstsq. ستون اول X باید ۱ (عرض از مبدأ) باشد."""
-    beta, *_ = np.linalg.lstsq(X, y, rcond=None)
-    return beta
+def _continuous(s: pd.Series) -> pd.Series:
+    return s.asfreq("B").ffill()
 
 
-def _build_predictor_frame(monthly: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-    """Core CPI/PPI YoY را از سطح شاخص‌ها می‌سازد و لیست ستون‌های پیش‌بین موجود را برمی‌گرداند."""
-    df = monthly.copy()
-    predictor_cols = []
-
-    df["CORE_CPI_YOY"] = df["CPILFESL"].pct_change(12) * 100
-    predictor_cols.append("CORE_CPI_YOY")
-
-    if "PPIFES" in df.columns:
-        df["CORE_PPI_YOY"] = df["PPIFES"].pct_change(12) * 100
-        predictor_cols.append("CORE_PPI_YOY")
-
-    if "WPSFD49116" in df.columns:
-        df["CORE_PPI_EXTRADE_YOY"] = df["WPSFD49116"].pct_change(12) * 100
-        predictor_cols.append("CORE_PPI_EXTRADE_YOY")
-
-    return df, predictor_cols
+def _triangular_ma(price: pd.Series, window: int) -> pd.Series:
+    half = window // 2 + 1
+    return price.rolling(half, min_periods=half).mean().rolling(half, min_periods=half).mean()
 
 
-def nowcast_latest_gap(monthly: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    """
-    برای ماه(های) انتهایی که PCETRIM12M159SFRBDAL هنوز NaN است (چون منتشر
-    نشده)، با رگرسیون OLS روی آخرین NOWCAST_TRAIN_WINDOW_MONTHS ماه دادهٔ
-    رسمی، یک تخمین می‌سازد. برای همهٔ ماه‌های دیگر عدد رسمی دست‌نخورده
-    باقی می‌ماند.
-    خروجی: (دیتافریم به‌روزشده با ستون INFLATION_MEASURE و Inflation_Is_Nowcast،
-             دیکشنری تشخیصی شامل وضعیت فعال/غیرفعال بودن نوکست و R2/MAE فیت اخیر)
-    """
-    y_col = "PCETRIM12M159SFRBDAL"
-    df, predictor_cols = _build_predictor_frame(monthly)
-
-    df["INFLATION_MEASURE"] = df[y_col]
-    df["Inflation_Is_Nowcast"] = False
-
-    diagnostics = {"nowcast_enabled": "PPIFES" in monthly.columns, "fit_r2": np.nan, "fit_mae": np.nan,
-                    "predictors_used": predictor_cols, "n_train": 0}
-
-    if not diagnostics["nowcast_enabled"]:
-        return df, diagnostics
-
-    for i in range(len(df)):
-        if pd.notna(df[y_col].iloc[i]):
-            continue
-        x_row = df[predictor_cols].iloc[i]
-        if x_row.isna().any():
-            continue
-
-        train = df.iloc[max(0, i - NOWCAST_TRAIN_WINDOW_MONTHS):i].dropna(subset=[y_col] + predictor_cols)
-        if len(train) < NOWCAST_MIN_TRAIN_MONTHS:
-            continue
-
-        X_train = np.column_stack([np.ones(len(train))] + [train[c].values for c in predictor_cols])
-        y_train = train[y_col].values
-        beta = _fit_ols(X_train, y_train)
-
-        y_fit = X_train @ beta
-        ss_res = np.sum((y_train - y_fit) ** 2)
-        ss_tot = np.sum((y_train - y_train.mean()) ** 2)
-        diagnostics["fit_r2"] = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
-        diagnostics["fit_mae"] = float(np.mean(np.abs(y_train - y_fit)))
-        diagnostics["n_train"] = len(train)
-
-        x_pred = np.array([1.0] + list(x_row.values))
-        pred = float(x_pred @ beta)
-
-        df.iloc[i, df.columns.get_loc("INFLATION_MEASURE")] = pred
-        df.iloc[i, df.columns.get_loc("Inflation_Is_Nowcast")] = True
-
-    return df, diagnostics
+def _true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
+    prev_close = close.shift(1)
+    return pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
+    ).max(axis=1)
 
 
-# @st.cache_data(ttl=3600, show_spinner="در حال اجرای بک‌تست نوکست تورم...")
-def walkforward_backtest(monthly: pd.DataFrame) -> pd.DataFrame:
-    """
-    بک‌تست کاملاً out-of-sample (walk-forward): برای هر ماهی که عدد رسمی
-    را از قبل داریم، وانمود می‌کنیم آن را نمی‌دانیم و فقط با دادهٔ *قبل*
-    از آن ماه، یک نوکست می‌سازیم؛ سپس با عدد واقعی مقایسه می‌کنیم. این
-    صادقانه‌ترین سنجهٔ دقت نوکست است، نه صرفاً برازش درون‌نمونه‌ای خوش‌بینانه.
-    """
-    y_col = "PCETRIM12M159SFRBDAL"
-    if "PPIFES" not in monthly.columns:
-        return pd.DataFrame(columns=["Actual", "Nowcast", "Error"])
-
-    df, predictor_cols = _build_predictor_frame(monthly)
-    rows = []
-    for i in range(len(df)):
-        if pd.isna(df[y_col].iloc[i]):
-            continue
-        x_row = df[predictor_cols].iloc[i]
-        if x_row.isna().any():
-            continue
-        train = df.iloc[max(0, i - NOWCAST_TRAIN_WINDOW_MONTHS):i].dropna(subset=[y_col] + predictor_cols)
-        if len(train) < NOWCAST_MIN_TRAIN_MONTHS:
-            continue
-        X_train = np.column_stack([np.ones(len(train))] + [train[c].values for c in predictor_cols])
-        y_train = train[y_col].values
-        beta = _fit_ols(X_train, y_train)
-        x_pred = np.array([1.0] + list(x_row.values))
-        pred = float(x_pred @ beta)
-        rows.append({"date": df.index[i], "Actual": df[y_col].iloc[i], "Nowcast": pred})
-
-    if not rows:
-        return pd.DataFrame(columns=["Actual", "Nowcast", "Error"])
-
-    bt = pd.DataFrame(rows).set_index("date")
-    bt["Error"] = bt["Nowcast"] - bt["Actual"]
-    return bt
+def _average_true_range(high: pd.Series, low: pd.Series, close: pd.Series, window: int) -> pd.Series:
+    return _true_range(high, low, close).rolling(window, min_periods=window).mean()
 
 
-# ==========================================================================
-# 3) محاسبهٔ محورها و طبقه‌بندی رژیم
-# ==========================================================================
-
-def compute_regime(monthly: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    with_inflation, nowcast_diag = nowcast_latest_gap(monthly)
-    out = with_inflation.copy()
-
-    out["CFNAI_MA3"] = out["CFNAI"].rolling(3, min_periods=1).mean()
-
-    def g_level(v):
-        if pd.isna(v):
-            return np.nan
-        if v > THRESH["G_PLUS"]:
-            return "G+"
-        if v < THRESH["G_MINUS"]:
-            return "G-"
-        return "G="
-
-    def i_level(v):
-        if pd.isna(v):
-            return np.nan
-        if v > THRESH["I_PLUS"]:
-            return "I+"
-        if v < THRESH["I_MINUS"]:
-            return "I-"
-        return "I="
-
-    out["G_level_raw"] = out["CFNAI_MA3"].apply(g_level)
-    out["I_level_raw"] = out["INFLATION_MEASURE"].apply(i_level)
-
-    # ماشهٔ فوری Sahm Rule — مستقیم از ستون واقعی SAHMREALTIME، بدون محاسبهٔ دستی
-    sahm_trigger = out["SAHMREALTIME"] >= THRESH["SAHM_TRIGGER"]
-
-    out["G_level"] = _apply_hysteresis(out["G_level_raw"], sahm_trigger, THRESH["HYSTERESIS_MONTHS"])
-    out["I_level"] = _apply_hysteresis(out["I_level_raw"], pd.Series(False, index=out.index), THRESH["HYSTERESIS_MONTHS"])
-
-    out["Regime"] = [REGIME_GRID_NAMES.get((g, i), np.nan) for g, i in zip(out["G_level"], out["I_level"])]
-
-    def financial_state(v):
-        if pd.isna(v):
-            return np.nan
-        if v <= -0.5:
-            return "accommodating"
-        if v < 0:
-            return "mildly_accommodating"
-        if v < 0.5:
-            return "neutral"
-        return "tight"
-
-    out["Financial_state"] = out["NFCI"].apply(financial_state)
-    out["Days_in_regime"] = _days_in_state(out["Regime"])
-    out["Days_in_financial_state"] = _days_in_state(out["Financial_state"])
-
-    return out, nowcast_diag
+def _keltner_filter(price, tma, trend_regime, atr, mult) -> pd.Series:
+    confirmed = trend_regime.copy()
+    distance = (price - tma).abs()
+    unconfirmed_mask = distance < (mult * atr)
+    confirmed = confirmed.where(~unconfirmed_mask, other=np.nan)
+    confirmed = confirmed.ffill()
+    return confirmed
 
 
-def _apply_hysteresis(raw_series: pd.Series, hard_gate: pd.Series, n_months: int) -> pd.Series:
-    current, pending, pending_count = None, None, 0
-    values, hard = raw_series.tolist(), hard_gate.tolist()
-    result = []
-    for i, v in enumerate(values):
-        if hard[i]:
-            current = "G-"
-            pending, pending_count = None, 0
-            result.append(current)
-            continue
-        if current is None:
-            current = v
-            result.append(current)
-            continue
-        if pd.isna(v):
-            result.append(current)
-            continue
-        if v == current:
-            pending, pending_count = None, 0
-            result.append(current)
-        else:
-            if v == pending:
-                pending_count += 1
-            else:
-                pending, pending_count = v, 1
-            if pending_count >= n_months:
-                current = pending
-                pending, pending_count = None, 0
-            result.append(current)
-    return pd.Series(result, index=raw_series.index)
-
-
-def _days_in_state(s: pd.Series) -> pd.Series:
+def _days_in_state(state_series: pd.Series) -> pd.Series:
     counts, run, prev = [], 0, None
-    for v in s.tolist():
+    for v in state_series.tolist():
         if pd.isna(v):
             run = 0
         elif v == prev:
@@ -371,211 +138,574 @@ def _days_in_state(s: pd.Series) -> pd.Series:
             run = 1
         counts.append(run)
         prev = v if pd.notna(v) else prev
-    return pd.Series(counts, index=s.index)
+    return pd.Series(counts, index=state_series.index)
 
 
-def get_reference_row(df: pd.DataFrame) -> pd.Series:
-    valid = df.dropna(subset=["CFNAI_MA3", "INFLATION_MEASURE"])
-    return valid.iloc[-1] if not valid.empty else df.iloc[-1]
+def _regime_transition_lookup(res, low_var_state: int, high_var_state: int) -> dict:
+    """
+    dict با کلید (from_label, to_label) -> احتمال گذار، بر چسب‌های
+    low_var/high_var (نه اندیس خام ۰/۱ که بین دو fit مختلف ممکنه
+    جابه‌جا باشه). طبق مستندات رسمی statsmodels: p[i->j] یعنی احتمال
+    گذار از رژیم i به رژیم j.
+    """
+    p00 = res.params["p[0->0]"]  # P(فردا=۰ | امروز=۰)
+    p10 = res.params["p[1->0]"]  # P(فردا=۰ | امروز=۱)
+    raw = {
+        (0, 0): p00,
+        (0, 1): 1 - p00,
+        (1, 0): p10,
+        (1, 1): 1 - p10,
+    }
+    label = {low_var_state: "low_var", high_var_state: "high_var"}
+    return {(label[frm], label[to]): prob for (frm, to), prob in raw.items()}
 
 
 # ==========================================================================
-# 4) رابط کاربری Streamlit
+# پایپ‌لاین کامل — کش‌شده با mtime. همیشه روی کل تاریخچه.
 # ==========================================================================
 
-def show():
-    inject_global_style()
-    st.markdown("# 📊 US Macro Regime — Eco3min Methodology")
-    st.caption("Growth (CFNAI) × Inflation (Trimmed Mean PCE) — دقیقاً طبق چارچوب eco3min.fr")
+@st.cache_data(show_spinner="در حال فیت مدل Markov-Switching...")
+def run_pipeline(db_path: str, mtime: float, return_kind: str = "log"):
+    ohlc = pd.read_csv(db_path, usecols=["Date", CLOSE_COL, HIGH_COL, LOW_COL])
+    ohlc["Date"] = pd.to_datetime(ohlc["Date"])
+    ohlc = ohlc.set_index("Date").sort_index()
 
-    try:
-        monthly_raw = load_monthly_data()
-    except (FileNotFoundError, KeyError) as e:
-        st.error(str(e))
+    close_full = ohlc[CLOSE_COL]
+    high_full = ohlc[HIGH_COL]
+    low_full = ohlc[LOW_COL]
+
+    log_ret = _to_returns(close_full, kind=return_kind)
+
+    model = MarkovRegression(
+        log_ret, k_regimes=2, trend="c", switching_trend=False, switching_variance=True
+    )
+    res = model.fit()
+    summary_text = str(res.summary())
+    llf = res.llf
+
+    sigma2 = [res.params[f"sigma2[{i}]"] for i in range(2)]
+    low_var_state = int(np.argmin(sigma2))
+    high_var_state = 1 - low_var_state
+
+    smoothed = res.smoothed_marginal_probabilities
+    variance_regime = np.where(smoothed[high_var_state] > 0.5, "high_var", "low_var")
+    variance_df = pd.DataFrame(
+        {
+            "variance_regime": variance_regime,
+            "prob_high_var_smoothed": smoothed[high_var_state].values,
+        },
+        index=log_ret.index,
+    )
+
+    transition = _regime_transition_lookup(res, low_var_state, high_var_state)
+    prob_high_today = float(smoothed[high_var_state].iloc[-1])
+    prob_low_today = 1.0 - prob_high_today
+    prob_high_tomorrow = (
+        prob_low_today * transition[("low_var", "high_var")]
+        + prob_high_today * transition[("high_var", "high_var")]
+    )
+
+    close_cont = _continuous(close_full)
+    high_cont = _continuous(high_full)
+    low_cont = _continuous(low_full)
+
+    tma = _triangular_ma(close_cont, TMA_WINDOW)
+    # هشدار: عدد > NaN همیشه False برمی‌گرده (نه NaN)، پس np.where بدون این
+    # فیکس، کل دوره‌ی warm-up ی TMA (~۲۵۰ روز اول) رو بی‌صدا "bearish" می‌کرد،
+    # حتی اگه قیمت واقعاً صعودی بود. اینجا صریحاً NaN نگه داشته می‌شه تا اون
+    # دوره از تحلیل حذف بشه (نه اشتباه برچسب بخوره).
+    trend_regime = pd.Series(
+        np.where(close_cont > tma, "bullish", "bearish"), index=close_cont.index
+    )
+    trend_regime[tma.isna()] = np.nan
+
+    atr = _average_true_range(high_cont, low_cont, close_cont, ATR_WINDOW)
+    trend_confirmed = _keltner_filter(close_cont, tma, trend_regime, atr, KELTNER_MULT)
+
+    combined = variance_df.join(trend_confirmed.rename("trend_regime"), how="inner")
+    combined["final_regime"] = combined.apply(
+        lambda r: REGIME_MAP.get((r["trend_regime"], r["variance_regime"]), np.nan), axis=1
+    )
+    combined["days_in_regime"] = _days_in_state(combined["final_regime"])
+    combined = combined.join(log_ret.rename("period_return"), how="inner")
+    combined = combined.join(close_cont.rename("close"), how="left")
+    combined = combined.join(tma.rename("tma"), how="left")
+
+    stats = combined.groupby("final_regime")["period_return"].agg(
+        mean_daily_return="mean", std_daily_return="std", n_days="count"
+    )
+    stats["mean_daily_return_pct"] = (stats["mean_daily_return"] * 100).round(4)
+    stats["std_daily_return_pct"] = (stats["std_daily_return"] * 100).round(4)
+    stats = stats[["n_days", "mean_daily_return_pct", "std_daily_return_pct"]]
+
+    return {
+        "summary_text": summary_text,
+        "llf": llf,
+        "sigma2_low": sigma2[low_var_state],
+        "sigma2_high": sigma2[high_var_state],
+        "combined": combined,
+        "stats": stats,
+        "n_obs": len(log_ret),
+        "date_start": log_ret.index.min(),
+        "date_end": log_ret.index.max(),
+        "transition": transition,
+        "prob_high_today": prob_high_today,
+        "prob_high_tomorrow": prob_high_tomorrow,
+    }
+
+
+@st.cache_data(show_spinner="در حال محاسبه‌ی walk-forward...")
+def fit_walkforward_point(db_path: str, mtime: float, return_kind: str, cutoff: int) -> dict:
+    """
+    مدل رو *از نو*، فقط با داده‌ی تا (آخرین روز - cutoff) فیت می‌کنه —
+    یعنی cutoff روز آخر کلاً از ورودی مدل حذف می‌شن، نه فقط از نمایش.
+    """
+    ohlc = pd.read_csv(db_path, usecols=["Date", CLOSE_COL, HIGH_COL, LOW_COL])
+    ohlc["Date"] = pd.to_datetime(ohlc["Date"])
+    ohlc = ohlc.set_index("Date").sort_index()
+
+    log_ret_full = _to_returns(ohlc[CLOSE_COL], kind=return_kind)
+    ret_slice = log_ret_full.iloc[: len(log_ret_full) - cutoff] if cutoff > 0 else log_ret_full
+
+    model = MarkovRegression(
+        ret_slice, k_regimes=2, trend="c", switching_trend=False, switching_variance=True
+    )
+    res = model.fit()
+
+    sigma2 = [res.params[f"sigma2[{i}]"] for i in range(2)]
+    low_var_state = int(np.argmin(sigma2))
+    high_var_state = 1 - low_var_state
+
+    smoothed = res.smoothed_marginal_probabilities
+    prob_high = float(smoothed[high_var_state].iloc[-1])
+    prob_low = 1.0 - prob_high
+    label = "high_var" if prob_high > 0.5 else "low_var"
+
+    transition = _regime_transition_lookup(res, low_var_state, high_var_state)
+    prob_high_next = prob_low * transition[("low_var", "high_var")] + prob_high * transition[("high_var", "high_var")]
+
+    return {
+        "date": ret_slice.index[-1],
+        "label": label,
+        "prob_high": prob_high,
+        "prob_low": prob_low,
+        "transition": transition,
+        "prob_high_next": prob_high_next,
+        "period_return": float(ret_slice.iloc[-1]),  # قبلاً: "log_return"
+    }
+
+
+@st.cache_data(show_spinner=False)
+def load_sector_prices(path: str, mtime: float) -> pd.DataFrame:
+    available = pd.read_csv(path, nrows=0).columns
+    cols = [c for c in SECTOR_COLUMNS if c in available]
+    if not cols:
+        return pd.DataFrame()
+    df = pd.read_csv(path, usecols=["Date"] + cols)
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df.set_index("Date").sort_index()
+    for c in cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+
+def _render_snapshot_block(container, title: str, date, var_label: str, trend_label: str,
+                            prob_high: float, transition: dict, prob_high_next: float,
+                            next_title: str, log_return: float) -> None:
+    prob_this = prob_high if var_label == "high_var" else (1 - prob_high)
+    if prob_this > 0.8:
+        confidence = "🟢 قوی"
+    elif prob_this < 0.6:
+        confidence = "🟡 نامطمئن"
+    else:
+        confidence = "🔵 متوسط"
+
+    final_regime = REGIME_MAP.get((trend_label, var_label), "نامشخص")
+
+    container.markdown(f"**{title} — {date.date()}**")
+    container.markdown(f"رژیم واریانس: `{var_label}` — {prob_this:.0%} ({confidence})")
+    container.markdown(f"رژیم نهایی (۴تایی): **{final_regime}**")
+    container.markdown(f"بازدهی واقعی همون روز: {log_return * 100:+.3f}%")
+    container.caption(
+        f"ماتریس انتقال (fit همین برش) — "
+        f"low→low: {transition[('low_var','low_var')]:.1%} | "
+        f"low→high: {transition[('low_var','high_var')]:.1%} | "
+        f"high→low: {transition[('high_var','low_var')]:.1%} | "
+        f"high→high: {transition[('high_var','high_var')]:.1%}"
+    )
+    container.markdown(f"پیش‌بینی برای **{next_title}**: احتمال پرنوسان‌بودن = **{prob_high_next:.0%}**")
+    container.divider()
+
+
+def render_asset_class_behaviour(combined: pd.DataFrame, sector_df: pd.DataFrame, sp500_stats: pd.DataFrame,
+                                  return_kind: str = "log") -> None:
+    """
+    معادل بخش «Asset Class Behaviour» (Table 4) مقاله‌ی SSRN 3144169 —
+    میانگین بازدهی هر شاخص، روی *کل* روزهایی که در طول تاریخچه در هر
+    رژیم بودیم (نه فقط یک اپیزود)، برای مقایسه‌ی مستقیم با جدول مقاله.
+    """
+    st.markdown("### 📚 Asset Class Behaviour (معادل Table 4 مقاله)")
+    st.caption(
+        "میانگین بازدهی روزانه‌ی هر دارایی، شرطی بر رژیمی که آن روز در آن بودیم — "
+        "روی کل تاریخچه (نه فقط اپیزود اخیر). "
+        f"همه‌ی سری‌ها (SP500 و شاخص‌های بخشی) با روش «{return_kind}» محاسبه شدن — هماهنگ با "
+        "انتخاب بالای صفحه، تا مقایسه‌ی مستقیم بین ردیف‌ها معتبر بمونه."
+    )
+
+    if sector_df.empty:
+        st.warning("هیچ‌کدوم از ستون‌های شاخص بخشی توی دیتابیس نیستن.")
         return
 
-    df, nowcast_diag = compute_regime(monthly_raw)
-    ref = get_reference_row(df)
-    is_lagged = ref.name != df.index[-1]
+    rows = []
 
-    if is_lagged:
-        months_behind = (df.index[-1].to_period("M") - ref.name.to_period("M")).n
-        st.warning(
-            f"⚠️ داده‌های ماه(های) اخیر هنوز کامل نیستند. این گزارش مربوط به "
-            f"آخرین ماه دارای دادهٔ کامل (رسمی یا نوکست) است: **{ref.name.strftime('%B %Y')}** "
-            f"({months_behind} ماه عقب‌تر از آخرین ردیف دیتابیس)."
-        )
+    sp500_row = {"دارایی": "SP500 (خودِ مدل)"}
+    for regime in REGIME_ORDER:
+        sp500_row[regime] = sp500_stats["mean_daily_return_pct"].get(regime, np.nan)
+    rows.append(sp500_row)
 
-    # --- وضعیت منبع تورم ماه مرجع (رسمی یا نوکست) ---
-    if bool(ref.get("Inflation_Is_Nowcast", False)):
-        st.info(
-            f"🔮 **نوکست فعال برای {ref.name.strftime('%B %Y')}**: عدد رسمی "
-            f"Trimmed Mean PCE هنوز از Dallas Fed منتشر نشده؛ مقدار نمایش‌داده‌شده "
-            f"({ref['INFLATION_MEASURE']:.2f}%) تخمینی از رگرسیون Core CPI/PPI است "
-            f"(R² درون‌نمونه‌ای فیت اخیر: {nowcast_diag['fit_r2']:.2f}، با "
-            f"{nowcast_diag['n_train']} ماه دادهٔ آموزشی)."
-        )
-    else:
-        st.success(f"✅ برای {ref.name.strftime('%B %Y')} عدد رسمی Trimmed Mean PCE موجود است (بدون نوکست).")
+    sector_ret = sector_df.apply(lambda s: _to_returns(s, kind=return_kind))  # قبلاً: kind="log" هاردکد
+    for ticker, name in SECTOR_COLUMNS.items():
+        if ticker not in sector_ret.columns:
+            continue
+        merged = combined[["final_regime"]].join(sector_ret[ticker].rename("ret"), how="inner")
+        by_regime = merged.groupby("final_regime")["ret"].mean() * 100
+        row = {"دارایی": f"{ticker} ({name})"}
+        for regime in REGIME_ORDER:
+            row[regime] = by_regime.get(regime, np.nan)
+        rows.append(row)
 
-    with st.expander("ℹ️ جزئیات فنی نوکست تورم و محدودیت‌ها"):
-        if nowcast_diag["nowcast_enabled"]:
-            st.markdown(
-                f"- **پیش‌بینی‌کننده‌های فعال:** {', '.join(nowcast_diag['predictors_used'])}\n"
-                f"- **پنجرهٔ آموزش:** آخرین {NOWCAST_TRAIN_WINDOW_MONTHS} ماه دادهٔ رسمی (رگرسیون هر بار دوباره فیت می‌شود)\n"
-                "- این نوکست فقط برای ماه(های) انتهایی که Dallas Fed هنوز منتشر نکرده استفاده می‌شود؛ "
-                "برای تمام تاریخچهٔ قبلی، عدد رسمی و دقیق eco3min بدون تغییر باقی می‌ماند.\n"
-                "- این یک **تخمین آماری خوب** است، نه معادل صددرصدی عدد رسمی — به بخش بک‌تست پایین صفحه نگاه کنید."
-            )
-        else:
-            st.markdown(
-                "- نوکست غیرفعال است چون ستون **PPIFES** در دیتابیس شما پیدا نشد.\n"
-                "- برای فعال‌سازی، ستون `PPIFES` (PPI Final Demand Less Foods and Energy) "
-                "را به دیتابیس اضافه کنید؛ اختیاری: `WPSFD49116` هم دقت را کمی بهتر می‌کند."
-            )
-
-    # --- کارت‌های رژیم فعلی ---
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("CURRENT REGIME", ref["Regime"])
-    c2.metric("CFNAI-MA3 (Growth)", f"{ref['CFNAI_MA3']:+.3f}", help="G+ اگر بیش از +0.10 ، G- اگر کمتر از -0.50")
-    c3.metric("Trimmed Mean PCE", f"{ref['INFLATION_MEASURE']:.2f}%", help="I+ اگر بیش از 2.75% ، I- اگر کمتر از 1.50%")
-    c4.metric("Days in Regime", int(ref["Days_in_regime"]))
-
-    st.markdown(
-        f"**Financial Conditions (NFCI, context — طبق eco3min جزو نام‌گذاری رژیم نیست):** "
-        f"`{ref['Financial_state']}` — {int(ref['Days_in_financial_state'])} ماه در همین وضعیت"
+    table = pd.DataFrame(rows).set_index("دارایی")
+    st.dataframe(
+        table.style.format("{:+.3f}%", na_rep="—").background_gradient(
+            cmap="RdYlGn", axis=None, vmin=-0.15, vmax=0.15
+        ),
+        use_container_width=True,
     )
 
-    # --- گرید نام‌گذاری رژیم ۳×۳ ---
-    st.markdown("### Regime Classification Grid")
-    grid_layout = [
-        ("G+", "I-", "Disinflationary Expansion"), ("G+", "I=", "Balanced Expansion"), ("G+", "I+", "Overheating"),
-        ("G=", "I-", "Transition"), ("G=", "I=", "Transition"), ("G=", "I+", "Inflationary Pressure"),
-        ("G-", "I-", "Disinflationary Contraction"), ("G-", "I=", "Slowdown"), ("G-", "I+", "Stagflation"),
-    ]
-    grid_cols = st.columns(3)
-    for idx, (g, i, name) in enumerate(grid_layout):
-        col = grid_cols[idx % 3]
-        is_current = (g == ref["G_level"] and i == ref["I_level"])
-        color = REGIME_COLORS.get(name, "#888")
-        border = f"2px solid {color}" if is_current else "1px solid #333"
-        bg = color + "22" if is_current else "#111"
-        badge = '<span style="float:right;font-size:10px;background:#ffffff22;padding:1px 6px;border-radius:5px;">CURRENT</span>' if is_current else ""
-        col.markdown(f"""
-        <div style="border:{border};background:{bg};border-radius:8px;padding:10px;margin-bottom:8px;text-align:center;">
-            <div style="color:{color};font-weight:700;">{name}{badge}</div>
-            <div style="color:#888;font-size:11px;">[{g} , {i}]</div>
-        </div>
-        """, unsafe_allow_html=True)
+def regime_growth_contribution(combined: pd.DataFrame):
+    """
+    سهم هر رژیم (Advance/Accumulation/Decline/Distribution) در رشد کل
+    SP500 طیِ کل بازه‌ی combined.index — دقیق، نه تقریبی. سهم روزِ t =
+    I(t-1) × بازده‌ی روز t (I = شاخص ترکیبیِ قیمت، شروع از ۱). طبق یه
+    اتحاد جبریِ تلسکوپی، مجموع این سهم‌ها روی تمام روزها همیشه دقیقاً
+    برابر رشد کل (P_end/P_start - 1) است؛ گروه‌بندی بر اساس رژیم، مجموع
+    را عوض نمی‌کند.
+    """
+    prices = combined["close"].dropna()
+    if len(prices) < 2:
+        return None
 
-    # --- نمودار خط‌زمانی رژیم + CFNAI/Inflation ---
-    st.markdown("### Regime Timeline")
-    plotdf = df.dropna(subset=["Regime"])
+    regime = combined["final_regime"].reindex(prices.index)
 
-    # چقدر پررنگ باشند نوارهای پس‌زمینه — این عدد را برای کم/زیاد کردن شدت رنگ عوض کنید
-    REGIME_BAND_OPACITY = 0.7
+    daily_rate = prices.pct_change()
+    running_index = (1 + daily_rate.fillna(0)).cumprod()
+    prev_index = running_index.shift(1).fillna(1.0)
 
-    if not plotdf.empty:
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=plotdf.index, y=plotdf["CFNAI_MA3"], name="CFNAI-MA3 (Growth)",
-                                  line=dict(color="#2f9bd6", width=2)))
-        fig.add_trace(go.Scatter(x=plotdf.index, y=plotdf["INFLATION_MEASURE"], name="Trimmed Mean PCE (%)",
-                                  line=dict(color="#e8a33d", width=2), yaxis="y2"))
+    contribution = (prev_index * daily_rate).iloc[1:]
+    regime_for_contrib = regime.iloc[1:]
 
-        nowcast_pts = plotdf[plotdf["Inflation_Is_Nowcast"]]
-        if not nowcast_pts.empty:
-            fig.add_trace(go.Scatter(x=nowcast_pts.index, y=nowcast_pts["INFLATION_MEASURE"],
-                                      name="Nowcast point", mode="markers",
-                                      marker=dict(color="#ff5252", size=9, symbol="diamond"), yaxis="y2"))
+    total_growth_pct = (prices.iloc[-1] / prices.iloc[0] - 1) * 100
 
-        shapes = []
-        prev, seg_start = None, plotdf.index[0]
-        for date, regime in plotdf["Regime"].items():
-            if regime != prev:
-                if prev is not None:
-                    shapes.append(dict(type="rect", xref="x", yref="paper", x0=seg_start, x1=date,
-                                        y0=0, y1=1, fillcolor=REGIME_COLORS.get(prev, "#888"),
-                                        opacity=REGIME_BAND_OPACITY, line_width=0))
-                seg_start, prev = date, regime
-        if prev is not None:
-            shapes.append(dict(type="rect", xref="x", yref="paper", x0=seg_start, x1=plotdf.index[-1],
-                                y0=0, y1=1, fillcolor=REGIME_COLORS.get(prev, "#888"),
-                                opacity=REGIME_BAND_OPACITY, line_width=0))
+    by_regime = contribution.groupby(regime_for_contrib).sum() * 100
+    by_regime = by_regime.reindex(REGIME_ORDER).fillna(0.0)
 
-        # --- ترفند: shape های plotly خودشان در legend نمی‌آیند؛ برای همین یک
-        # trace نامرئی (بدون هیچ نقطهٔ واقعی) برای هر رژیمی که در این بازه
-        # واقعاً دیده می‌شود اضافه می‌کنیم، فقط تا در legend نمایش داده شود.
-        regimes_present = plotdf["Regime"].unique().tolist()
-        for regime in regimes_present:
-            color = REGIME_COLORS.get(regime, "#888")
-            fig.add_trace(go.Scatter(
-                x=[None], y=[None], mode="markers",
-                marker=dict(size=14, color=color, symbol="square", opacity=REGIME_BAND_OPACITY + 0.3),
-                name=regime, showlegend=True,
-            ))
+    return by_regime, total_growth_pct
 
-        fig.update_layout(
-            template="plotly_dark", height=460, shapes=shapes,
-            yaxis=dict(title="CFNAI-MA3"),
-            yaxis2=dict(title="Trimmed Mean PCE (%)", overlaying="y", side="right"),
-            legend=dict(orientation="h", y=1.18, font=dict(size=11)),
-            margin=dict(t=60, b=30),
-        )
-        st.plotly_chart(fig, use_container_width=True)
 
-        # --- راهنمای رنگی اضافه زیر نمودار (خیلی واضح‌تر، همیشه قابل‌خواندن) ---
-        legend_html = "<div style='display:flex;flex-wrap:wrap;gap:14px;margin-top:-10px;margin-bottom:10px;'>"
-        for regime in regimes_present:
-            color = REGIME_COLORS.get(regime, "#888")
-            legend_html += (
-                f"<div style='display:flex;align-items:center;gap:6px;'>"
-                f"<span style='width:14px;height:14px;background:{color};border-radius:3px;display:inline-block;'></span>"
-                f"<span style='font-size:13px;color:#ddd;'>{regime}</span></div>"
-            )
-        legend_html += "</div>"
-        st.markdown(legend_html, unsafe_allow_html=True)
-        st.caption(f"شدت رنگ نوارهای پس‌زمینه (opacity) الان {REGIME_BAND_OPACITY} است — برای پررنگ‌تر/کم‌رنگ‌تر کردن، مقدار REGIME_BAND_OPACITY را در کد بالای همین بخش تغییر دهید (بین 0 تا 1).")
+def render_regime_growth_table(combined: pd.DataFrame) -> None:
+    result = regime_growth_contribution(combined)
+    if result is None:
+        return
 
-    # --- تاریخچهٔ ۱۲ ماه اخیر ---
-    st.markdown("### Last 12 Months")
-    hist = plotdf[["G_level", "I_level", "Regime", "Financial_state", "Inflation_Is_Nowcast"]].tail(12).copy()
-    hist.index = hist.index.strftime("%Y-%m")
-    st.dataframe(hist, use_container_width=True)
+    by_regime, total_growth_pct = result
 
-    # --- درصد زمان در هر رژیم ---
-    st.markdown("### Time Spent in Each Regime (Full History)")
-    if not plotdf.empty:
-        dist = (plotdf["Regime"].value_counts(normalize=True) * 100).round(1)
-        st.bar_chart(dist)
+    table = pd.DataFrame([by_regime.round(2)], index=["رشد (٪)"])
+    table["مجموع (= رشد کل بازه)"] = round(total_growth_pct, 2)
 
-    # --- بک‌تست صادقانهٔ نوکست (walk-forward, out-of-sample) ---
-    st.markdown("### 🔬 Nowcast Backtest (Walk-Forward, Out-of-Sample)")
-    bt = walkforward_backtest(monthly_raw)
-    if bt.empty:
-        st.caption("بک‌تست غیرفعال (ستون PPIFES در دیتابیس نیست).")
-    else:
-        mae = bt["Error"].abs().mean()
-        ss_res = (bt["Error"] ** 2).sum()
-        ss_tot = ((bt["Actual"] - bt["Actual"].mean()) ** 2).sum()
-        r2_oos = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+    st.markdown("### 📈 سهم هر رژیم در رشد کل SP500")
+    st.dataframe(table.style.format("{:+.2f}%"), use_container_width=True)
+    st.caption(
+        "این تجزیه دقیقه، نه تقریبی: مجموع چهار عدد رژیم همیشه دقیقاً برابر رشد کل بازار طیِ کل "
+        "بازه‌ی داده است (بر اساس یک اتحاد ریاضی، نه گردکردن یا میانگین‌گیری)."
+    )
 
-        bcol1, bcol2 = st.columns(2)
-        bcol1.metric("MAE (خطای مطلق میانگین، واحد درصد)", f"{mae:.2f}")
-        bcol2.metric("R² خارج از نمونه (Out-of-Sample)", f"{r2_oos:.2f}")
 
-        fig_bt = go.Figure()
-        fig_bt.add_trace(go.Scatter(x=bt.index, y=bt["Actual"], name="Actual (رسمی)", line=dict(color="#66bb6a")))
-        fig_bt.add_trace(go.Scatter(x=bt.index, y=bt["Nowcast"], name="Nowcast (walk-forward)",
-                                     line=dict(color="#ff5252", dash="dot")))
-        fig_bt.update_layout(template="plotly_dark", height=350, margin=dict(t=20, b=20),
-                              legend=dict(orientation="h", y=1.12))
-        st.plotly_chart(fig_bt, use_container_width=True)
-        st.caption(
-            "این بک‌تست کاملاً out-of-sample است: برای هر ماه، فقط از داده‌های *قبل* از آن ماه "
-            "برای فیت رگرسیون استفاده شده — دقیقاً همان چیزی که در لحظهٔ واقعی نوکست در اختیار داشتید."
-        )
+def render_current_episode_sectors(combined: pd.DataFrame, sector_df: pd.DataFrame) -> None:
+    """بازدهی هر شاخص بخشی، فقط از شروع اپیزودِ رژیم فعلی تا امروز."""
+    n_current = int(combined["days_in_regime"].iloc[-1])
+    current_regime_name = combined["final_regime"].iloc[-1]
+    start_idx = max(len(combined) - n_current, 0)
+    start_date = combined.index[start_idx]
+    end_date = combined.index[-1]
+
+    st.markdown(f"### 🔥 عملکرد بخشی در رژیم فعلی — {current_regime_name}")
+    st.caption(f"{n_current} روزه توی این رژیم هستیم — از {start_date.date()} تا {end_date.date()}")
+
+    if sector_df.empty:
+        st.warning("ستون‌های شاخص بخشی توی دیتابیس نیستن.")
+        return
+
+    idx = sector_df.index
+    pos_start = idx.searchsorted(start_date)
+    pos_base = max(pos_start - 1, 0)
+    base_prices = sector_df.iloc[pos_base]
+    end_prices = sector_df.loc[:end_date].iloc[-1]
+    ret = ((end_prices / base_prices - 1) * 100).dropna().sort_values(ascending=False)
+
+    if ret.empty:
+        st.warning("داده‌ی کافی برای این بازه نیست.")
+        return
+
+    labels = [f"{t} ({SECTOR_COLUMNS.get(t, t)})" for t in ret.index]
+    colors = ["#4caf50" if v >= 0 else "#d9534f" for v in ret.values]
+    fig = go.Figure(go.Bar(
+        x=ret.values, y=labels, orientation="h", marker_color=colors,
+        text=[f"{v:+.1f}%" for v in ret.values], textposition="outside",
+    ))
+    fig.update_layout(
+        template="plotly_dark", height=420,
+        margin=dict(l=10, r=60, t=10, b=10),
+        yaxis=dict(autorange="reversed"),
+    )
+    st.plotly_chart(fig, use_container_width=True, key="model6_current_episode_sectors")
+
+
+PANEL_KEY_SUFFIX = {
+    "Advance": "advance",
+    "Accumulation": "accumulation",
+    "Decline": "decline",
+    "Distribution": "distribution",
+    "All Regimes (Baseline)": "baseline",
+}
+
+
+def render_regime_correlation(combined: pd.DataFrame, sector_df: pd.DataFrame, return_kind: str = "log") -> None:
+    """معادل Figure 8 مقاله — ماتریس همبستگیِ بازدهی روزانه، جدا برای هر رژیم،
+    به‌علاوه‌ی یه پنل «All Regimes (Baseline)» که همون همبستگی رو بدون تفکیک
+    رژیم روی کل بازه نشون می‌ده — برای مقایسه‌ی هر رژیم با حالت عادی."""
+
+    st.markdown("### 🔗 ماتریس همبستگی به‌ازای هر رژیم (معادل Figure 8 مقاله)")
+    st.caption(
+        "همبستگی بازدهی روزانه‌ی SP500 و شاخص‌های بخشی، فقط روی روزهایی که در همون رژیم بودیم. "
+        "پنل «All Regimes (Baseline)» همون محاسبه رو بدون تفکیک رژیم روی کل بازه نشون می‌ده، "
+        "تا معلوم بشه هر رژیم چقدر همبستگی‌ها رو نسبت به حالت عادی جابه‌جا می‌کنه."
+    )
+
+    if sector_df.empty:
+        st.warning("ستون‌های شاخص بخشی توی دیتابیس نیستن.")
+        return
+
+    sector_ret = sector_df.apply(lambda s: _to_returns(s, kind=return_kind))
+    all_ret = sector_ret.join(combined["period_return"].rename("SP500"), how="inner")
+    all_ret = all_ret.join(combined["final_regime"], how="inner")
+    all_ret = all_ret.dropna(subset=["final_regime"])
+
+    if all_ret.empty:
+        st.warning("داده‌ی مشترکی بین SP500 و شاخص‌های بخشی پیدا نشد.")
+        return
 
     st.caption(
-        "منبع داده: macro_database.csv (فقط‌خواندنی) | روش‌شناسی رژیم: eco3min.fr | "
-        f"آخرین ردیف دیتابیس: {df.index[-1].strftime('%Y-%m-%d')}"
+        f"⚠️ این بخش محدود به بازه‌ایه که داده‌ی بخشی هم موجوده: "
+        f"{all_ret.index.min().date()} تا {all_ret.index.max().date()} "
+        f"({len(all_ret):,} روز) — کمتر از تاریخچه‌ی کامل SP500 در باکس‌های بالا، "
+        f"چون بیشتر ETFهای بخشی (XLK/XLF/... از ۱۹۹۸، RSP از ۲۰۰۳، GDX از ۲۰۰۶، "
+        f"XLRE از ۲۰۱۵، XLC از ۲۰۱۸) دیرتر از SP500 راه افتادن."
     )
+
+    cols_order = ["SP500"] + [t for t in SECTOR_COLUMNS if t in sector_ret.columns]
+
+    panels = REGIME_ORDER + ["All Regimes (Baseline)"]
+    grid = st.columns(2)
+    for i, regime in enumerate(panels):
+        if regime == "All Regimes (Baseline)":
+            subset = all_ret[cols_order].dropna(axis=1, how="all")
+        else:
+            subset = all_ret[all_ret["final_regime"] == regime][cols_order].dropna(axis=1, how="all")
+
+        n = len(subset)
+        with grid[i % 2]:
+            if n < 30 or subset.shape[1] < 2:
+                st.warning(f"{regime}: داده‌ی کافی نیست ({n} روز)")
+                continue
+            corr = subset.corr()
+            fig = go.Figure(data=go.Heatmap(
+                z=corr.values, x=list(corr.columns), y=list(corr.columns),
+                colorscale="RdBu", zmid=0, zmin=-1, zmax=1,
+                text=corr.round(2).values, texttemplate="%{text}",
+            ))
+            fig.update_layout(
+                title=f"{regime} ({n} روز)",
+                template="plotly_dark", height=420,
+                margin=dict(l=10, r=10, t=40, b=10),
+            )
+            st.plotly_chart(fig, use_container_width=True, key=f"model6_corr_{PANEL_KEY_SUFFIX[regime]}")
+
+
+# ==========================================================================
+# رابط کاربری
+# ==========================================================================
+
+def show() -> None:
+
+    inject_global_style()
+
+    st.markdown("# 📐 Model 3 — Markov-Switching Regime (SSRN 3144169)")
+    st.caption("replication روش‌شناسی مقاله روی S&P500 — فقط نمایشی، هنوز به دیتابیس ذخیره نمی‌شه")
+
+    with st.expander("⚠️ فرضیات صریح این مدل (چون خودِ مقاله مبهم بود)", expanded=False):
+        st.markdown(
+            """
+            - لایه‌ی واریانس: `MarkovRegression` با `trend='c', switching_trend=False, switching_variance=True`، بدون جمله‌ی AR
+            - TMA = SMA روی SMA (double smoothing ساده)
+            - ATR واقعیه (از SP500_H/SP500_L/SP500)، میانگین ساده روی ۲۰ روز (نه smoothing وایلدر)
+            - بازدهی فقط بین دو observation معتبر و متوالی (نه پرکردن جای خالی)
+            - از **smoothed probability** استفاده شده (مناسب مطالعه‌ی تاریخی، نه فیچر زنده)
+            """
+        )
+
+    if not os.path.isfile(DB_PATH):
+        st.error(f"دیتابیس پیدا نشد:\n`{DB_PATH}`")
+        return
+
+    missing = [c for c in (CLOSE_COL, HIGH_COL, LOW_COL) if c not in pd.read_csv(DB_PATH, nrows=0).columns]
+    if missing:
+        st.error(f"این ستون‌ها توی دیتابیس نیستن: {missing}")
+        return
+
+    return_kind = st.radio(
+        "نوع بازدهی",
+        options=["log", "simple"],
+        horizontal=True,
+    )
+
+    result = run_pipeline(DB_PATH, os.path.getmtime(DB_PATH), return_kind)
+
+    # ---- خلاصه‌ی بازه ----
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("بازه‌ی داده", f"{result['date_start'].date()} → {result['date_end'].date()}")
+    c2.metric("تعداد observation", f"{result['n_obs']:,}")
+    c3.metric("sigma² (کم‌نوسان / پرنوسان)", f"{result['sigma2_low']:.5f} / {result['sigma2_high']:.5f}")
+    c4.metric("نسبت واریانس", f"{result['sigma2_high'] / result['sigma2_low']:.2f}", help="مقاله: 4.50")
+    st.caption(f"Log-Likelihood: {result['llf']:.3f}")
+
+    st.divider()
+
+    # ---- خروجی خام statsmodels + پنل walk-forward (کنار هم) ----
+    st.markdown("### خروجی مدل Markov-Switching Variance + وضعیت معاملاتی")
+
+    col_summary, col_panel = st.columns([1.3, 1])
+
+    with col_summary:
+        with st.expander("📄 res.summary() کامل", expanded=False):
+            st.code(result["summary_text"], language=None)
+
+    with col_panel:
+        combined = result["combined"]
+
+        today_date = combined.index[-1]
+        today_var_label = combined["variance_regime"].iloc[-1]
+        today_trend_label = combined["trend_regime"].iloc[-1]
+        today_return = combined["period_return"].iloc[-1]
+        _render_snapshot_block(
+            st, "📍 امروز", today_date, today_var_label, today_trend_label,
+            result["prob_high_today"], result["transition"], result["prob_high_tomorrow"],
+            "فردا", today_return,
+        )
+
+        yesterday = fit_walkforward_point(DB_PATH, os.path.getmtime(DB_PATH), return_kind, 1)
+        yesterday_trend_label = combined["trend_regime"].loc[yesterday["date"]]
+        _render_snapshot_block(
+            st, "📍 دیروز (بدون دیدن امروز)", yesterday["date"], yesterday["label"], yesterday_trend_label,
+            yesterday["prob_high"], yesterday["transition"], yesterday["prob_high_next"],
+            "امروز", yesterday["period_return"],  # قبلاً: yesterday["log_return"]
+        )
+
+        two_days_ago = fit_walkforward_point(DB_PATH, os.path.getmtime(DB_PATH), return_kind, 2)
+        two_days_ago_trend_label = combined["trend_regime"].loc[two_days_ago["date"]]
+        _render_snapshot_block(
+            st, "📍 دو روز پیش (بدون دیدن دیروز/امروز)", two_days_ago["date"], two_days_ago["label"],
+            two_days_ago_trend_label,
+            two_days_ago["prob_high"], two_days_ago["transition"], two_days_ago["prob_high_next"],
+            "دیروز", two_days_ago["period_return"],  # قبلاً: two_days_ago["log_return"]
+        )
+
+    st.divider()
+
+    # ---- توزیع ۴ رژیم نهایی ----
+    st.markdown("### توزیع رژیم نهایی")
+    st.caption(
+        f"روی کل تاریخچه‌ی SP500 توی دیتابیس ({result['date_start'].date()} تا {result['date_end'].date()}) — "
+        "شاخص‌های بخشی معمولاً دیرتر شروع شدن، پس جدول‌های همبستگیِ پایین‌تر صفحه بازه‌ی کوتاه‌تری رو پوشش می‌دن."
+    )
+    counts = result["combined"]["final_regime"].value_counts()
+    cols = st.columns(len(REGIME_MAP.values()))
+    for col, name in zip(cols, REGIME_ORDER):
+        n = int(counts.get(name, 0))
+        col.markdown(
+            f"""
+            <div style="border:1px solid rgba(255,255,255,0.09);background:rgba(255,255,255,0.025);
+                        border-radius:14px;padding:14px;text-align:center;">
+                <div style="color:{REGIME_COLORS[name]};font-weight:700;">{name}</div>
+                <div style="font-size:24px;font-weight:800;margin-top:4px;">{n:,}</div>
+                <div style="font-size:12px;color:#8a8f98;">روز</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+
+    sector_df = load_sector_prices(DB_PATH, os.path.getmtime(DB_PATH))
+
+    # ---- عملکرد بخشی در رژیم فعلی ----
+    render_current_episode_sectors(result["combined"], sector_df)
+
+    st.divider()
+
+    # ---- جدول آماری SP500 (معادل Table 3 مقاله) ----
+    st.markdown("### آمار بازدهی هر رژیم — SP500 (معادل Table 3 مقاله)")
+    st.dataframe(result["stats"], use_container_width=True)
+    render_regime_growth_table(result["combined"])
+
+    st.divider()
+
+    # ---- Asset Class Behaviour (معادل Table 4 مقاله) ----
+    render_asset_class_behaviour(result["combined"], sector_df, result["stats"], return_kind)
+
+    st.divider()
+
+    # ---- ماتریس همبستگی به‌ازای هر رژیم (معادل Figure 8 مقاله) ----
+    render_regime_correlation(result["combined"], sector_df, return_kind)
+
+    st.divider()
+
+    # ---- نمودار قیمت + رنگ‌آمیزی رژیم ----
+    st.markdown("### قیمت S&P500 با رنگ‌آمیزی رژیم")
+    combined_plot = result["combined"].dropna(subset=["final_regime"])
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(x=combined_plot.index, y=combined_plot["close"], name="SP500 Close", line=dict(color="#e8e8e8", width=1))
+    )
+    fig.add_trace(
+        go.Scatter(x=combined_plot.index, y=combined_plot["tma"], name="TMA (250d)", line=dict(color="#888", width=1, dash="dot"))
+    )
+
+    prev, seg_start = None, combined_plot.index[0]
+    for date, regime in combined_plot["final_regime"].items():
+        if regime != prev:
+            if prev is not None:
+                fig.add_vrect(x0=seg_start, x1=date, fillcolor=REGIME_COLORS[prev], opacity=0.25, line_width=0)
+            seg_start, prev = date, regime
+    fig.add_vrect(x0=seg_start, x1=combined_plot.index[-1], fillcolor=REGIME_COLORS[prev], opacity=0.25, line_width=0)
+
+    fig.update_layout(
+        template="plotly_dark",
+        height=420,
+        margin=dict(l=10, r=10, t=10, b=10),
+        legend=dict(orientation="h", y=1.08),
+        yaxis_type="log",
+    )
+    st.plotly_chart(fig, use_container_width=True, key="model6_price_chart")
+
+    st.caption("منبع: " + DB_PATH + " (read-only، هیچ‌چیز save نمی‌شه)")
