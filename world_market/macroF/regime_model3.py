@@ -384,18 +384,28 @@ def render_asset_class_behaviour(combined: pd.DataFrame, sector_df: pd.DataFrame
 
 def regime_growth_contribution(combined: pd.DataFrame):
     """
-    سهم هر رژیم (Advance/Accumulation/Decline/Distribution) در رشد کل
-    SP500 طیِ کل بازه‌ی combined.index — دقیق، نه تقریبی. سهم روزِ t =
-    I(t-1) × بازده‌ی روز t (I = شاخص ترکیبیِ قیمت، شروع از ۱). طبق یه
-    اتحاد جبریِ تلسکوپی، مجموع این سهم‌ها روی تمام روزها همیشه دقیقاً
-    برابر رشد کل (P_end/P_start - 1) است؛ گروه‌بندی بر اساس رژیم، مجموع
-    را عوض نمی‌کند.
+    سهم هر رژیم در رشد کل SP500 — دقیق، نه تقریبی. فقط از اولین روزی که
+    final_regime تعریف‌شده (یعنی بعد از دوره‌ی warm-up ی TMA/ATR) به بعد
+    حساب می‌شه — وگرنه total_growth_pct شامل روزهای بدون-رژیم می‌شه ولی
+    groupby (که پیش‌فرض NaN رو حذف می‌کنه) اون روزها رو توی هیچ رژیمی
+    نمی‌ذاره، و برابریِ «مجموع = رشد کل» دیگه دقیق نیست.
     """
     prices = combined["close"].dropna()
     if len(prices) < 2:
         return None
 
     regime = combined["final_regime"].reindex(prices.index)
+
+    valid_regime_idx = regime.dropna().index
+    if valid_regime_idx.empty:
+        return None
+
+    first_valid = valid_regime_idx[0]
+    prices = prices.loc[first_valid:]
+    regime = regime.loc[first_valid:]
+
+    if len(prices) < 2:
+        return None
 
     daily_rate = prices.pct_change()
     running_index = (1 + daily_rate.fillna(0)).cumprod()
